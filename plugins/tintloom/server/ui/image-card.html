@@ -1415,8 +1415,20 @@
     showComposer();
   }
 
+  // What the user moved and hid is kept on the server (the dashboard shows the same arrangement), a moment after the last change.
+  function keepArrangement() {
+    if (!L.keep || !L.baseId || (state.caps && state.caps.serverTools === false)) return;
+    clearTimeout(L.keepTimer);
+    L.keepTimer = setTimeout(() => {
+      const moves = {};
+      L.items.forEach((item) => { if (item.dx || item.dy) moves[item.image.id] = [item.dx, item.dy]; });
+      request('tools/call', { name: 'save_layer_arrangement', arguments: { id: L.baseId, moves, hidden: L.items.filter((item) => item.hidden).map((item) => item.image.id) } }, 15000).catch(() => {});
+    }, 800);
+  }
+
   function setHidden(item, hidden) {
     item.hidden = hidden;
+    keepArrangement();
     item.el.classList.toggle('off', hidden);
     item.row.classList.toggle('off', hidden);
     item.eye.innerHTML = hidden ? ICON_EYE_OFF : ICON_EYE;
@@ -1432,6 +1444,7 @@
     item.dx = Math.min(1 - mx, Math.max(-mx, dx));
     item.dy = Math.min(1 - my, Math.max(-my, dy));
     placeLayer(item);
+    keepArrangement();
   }
 
   function showLayers(data, result) {
@@ -1444,6 +1457,8 @@
     L.W = base ? base[0] : 0;
     L.H = base ? base[1] : 0;
     L.items = [];
+    L.keep = false;
+    L.baseId = data.images[0].id;
     L.loading = true;
     L.result = result;
     clearTimeout(L.dotsTimer);
@@ -1531,6 +1546,21 @@
     }, 150);
     reportLoading();
     L.items.forEach((item) => loadLayer(item));
+    // Put back how the user left the layers (and only then start keeping changes).
+    const baseId = L.baseId;
+    (state.caps && state.caps.serverTools === false ? Promise.resolve(null) : request('tools/call', { name: 'get_layer_set', arguments: { id: baseId } }, 10000).catch(() => null))
+      .then((res) => {
+        const saved = res && res.structuredContent && res.structuredContent.arrangement;
+        if (L.baseId !== baseId) return;
+        if (saved) {
+          L.items.forEach((item) => {
+            const move = saved.moves && saved.moves[item.image.id];
+            if (move && item.i > 0) { item.dx = Number(move[0]) || 0; item.dy = Number(move[1]) || 0; placeLayer(item); }
+            setHidden(item, Boolean(saved.hidden && saved.hidden.includes(item.image.id)));
+          });
+        }
+        L.keep = true;
+      });
     const facts = [data.providerLabel || data.provider, data.model, data.images.length + ' layers'];
     if (data.seconds) facts.push(data.seconds + 's');
     if (data.leftOut) facts.push(data.leftOut + ' small left out');
@@ -1767,7 +1797,7 @@
   fitPage();
   request('ui/initialize', {
     protocolVersion: '2026-01-26',
-    appInfo: { name: 'tintloom', version: '0.8.10' },
+    appInfo: { name: 'tintloom', version: '0.8.11' },
     appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
   }, 10000)
     .then((res) => {

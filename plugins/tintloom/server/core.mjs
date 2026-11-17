@@ -10,7 +10,7 @@ import { imageSize, maskFromRegions, clearUnderMask, keepOutsideMask, shrinkPng,
 import { UserError, extForMime, sniffMime } from '../skills/image/scripts/lib/util.mjs';
 import { getProvider, providers } from '../skills/image/scripts/providers/index.mjs';
 
-export const VERSION = '0.8.10';
+export const VERSION = '0.8.11';
 const PROTOCOL = '2025-06-18';
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 // Bigger images are not sent to the model inline: chat apps cap tool results.
@@ -131,6 +131,13 @@ const TOOLS = [
     title: 'Images ready so far',
     description: 'Used by the image card to show images as they finish. Not useful to call directly.',
     inputSchema: { type: 'object', properties: { key: { type: 'string' } }, required: ['key'] },
+    _meta: { ui: { visibility: ['app'] } },
+  },
+  {
+    name: 'save_layer_arrangement',
+    title: 'Keep how layers were arranged',
+    description: 'Used by the image card to keep what the user moved and hid in a layer set, so it is there after a reload (and on the dashboard). Not useful to call directly.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The id of the set\'s base.' }, moves: { type: 'object' }, hidden: { type: 'array', items: { type: 'string' } } }, required: ['id'] },
     _meta: { ui: { visibility: ['app'] } },
   },
   {
@@ -671,8 +678,26 @@ async function callTool(name, args = {}, ctx) {
       return { content: [{ type: 'text', text: 'progress' }], structuredContent: state || { images: [] } };
     }
     if (name === 'get_layer_set') {
-      const set = await (ctx.progress || memoryProgress).get(`layerset-${String(args.id || '')}`).catch(() => null);
-      return { content: [{ type: 'text', text: set ? 'layer set' : 'no layer set' }], structuredContent: { set: set || null } };
+      const notes = ctx.progress || memoryProgress;
+      const set = await notes.get(`layerset-${String(args.id || '')}`).catch(() => null);
+      // What the user moved and hid, kept under the base's id (the dashboard reads and writes the same note).
+      const arrangement = set?.images?.[0]?.id ? await notes.get(`layerarr-${set.images[0].id}`).catch(() => null) : null;
+      return { content: [{ type: 'text', text: set ? 'layer set' : 'no layer set' }], structuredContent: { set: set || null, arrangement: arrangement || null } };
+    }
+    if (name === 'save_layer_arrangement') {
+      const notes = ctx.progress || memoryProgress;
+      const id = String(args.id || '');
+      const set = await notes.get(`layerset-${id}`).catch(() => null);
+      if (!set?.images?.length || set.images[0].id !== id) throw new UserError('That layer set is not available.');
+      const known = new Set(set.images.map((i) => i.id));
+      const moves = {};
+      for (const [key, v] of Object.entries(args.moves && typeof args.moves === 'object' ? args.moves : {})) {
+        const [dx, dy] = Array.isArray(v) ? [Number(v[0]), Number(v[1])] : [NaN, NaN];
+        if (known.has(key) && Number.isFinite(dx) && Number.isFinite(dy) && (dx || dy)) moves[key] = [Math.max(-1, Math.min(1, dx)), Math.max(-1, Math.min(1, dy))];
+      }
+      const hidden = [...new Set((Array.isArray(args.hidden) ? args.hidden : []).filter((h) => typeof h === 'string' && known.has(h)))];
+      await notes.set(`layerarr-${id}`, { moves, hidden });
+      return { content: [{ type: 'text', text: 'saved' }], structuredContent: { saved: true } };
     }
     if (name === 'get_generated_image') {
       const image = await ctx.store.get(args.id);

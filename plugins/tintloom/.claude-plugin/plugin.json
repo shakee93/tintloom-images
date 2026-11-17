@@ -1,6 +1,6 @@
 {
   "name": "tintloom",
-  "version": "0.8.10",
+  "version": "0.8.11",
   "description": "Image generation and editing for Claude with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux), BytePlus ModelArk (Seedream) or a hosted endpoint. Images appear in an inline card.",
   "author": {
     "name": "Tintloom"

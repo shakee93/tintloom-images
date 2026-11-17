@@ -314,7 +314,7 @@ test('MCP: handshake, tools, and a notification gets no reply', async () => {
   assert.equal(init.result.serverInfo.name, 'tintloom');
   assert.equal(await handleMessage({ jsonrpc: '2.0', method: 'notifications/initialized' }, ctx), null);
   const tools = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx);
-  assert.deepEqual(tools.result.tools.map((t) => t.name), ['generate_image', 'list_image_providers', 'get_upload_url', 'save_mask', 'save_selection', 'get_progress', 'get_layer_set', 'get_generated_image']);
+  assert.deepEqual(tools.result.tools.map((t) => t.name), ['generate_image', 'list_image_providers', 'get_upload_url', 'save_mask', 'save_selection', 'get_progress', 'save_layer_arrangement', 'get_layer_set', 'get_generated_image']);
   assert.equal(tools.result.tools[0]._meta.ui.resourceUri, CARD_URI);
   assert.deepEqual(tools.result.tools[4]._meta.ui.visibility, ['app']);
   const card = await handleMessage({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri: CARD_URI } }, ctx);
@@ -820,4 +820,25 @@ test('card: a reloaded split is recognised, asked for by id, and never shown as 
   assert.match(card, /\^Split the image into/);
   assert.match(card, /richness/, 'the fuller of structuredContent and the text JSON is used');
   assert.match(card, /original \? \[original, \.\.\.layers\]/, 'without places for the layers, the original picture comes first');
+});
+
+// ---- Layer sets in the dashboard: one tile, the same arrangement in Claude and on the site ----
+test('layer arrangement (engine): what the user moved and hid is kept with the set, cleaned, and read back with it', async () => {
+  const ctx = { env: env({ TINTLOOM_MODELARK_KEY: 'm-test-123456' }), mode: 'stdio', store: new ImageStore(), projectDir: dir, session: { ui: true } };
+  const call = (name, args) => handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, ctx);
+  await writeFile(join(dir, 'arr.png'), BIG);
+  const made = await call('generate_image', { images: [{ path: 'arr.png' }], layers: true, out: 'layers-arr/' });
+  const [base, one, two] = made.result.structuredContent.images;
+  assert.equal((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement, null, 'nothing kept yet');
+  const kept = await call('save_layer_arrangement', { id: base.id, moves: { [one.id]: [0.1, -0.05], [two.id]: [0, 0], nope: [1, 1], [base.id]: ['x', 2] }, hidden: [two.id, two.id, 'nope', 7] });
+  assert.equal(kept.result.isError, undefined, JSON.stringify(kept));
+  const back = (await call('get_layer_set', { id: one.id })).result.structuredContent;
+  assert.deepEqual(back.arrangement, { moves: { [one.id]: [0.1, -0.05] }, hidden: [two.id] }, 'unknown ids, no-move entries and junk are dropped; the layer\'s own id finds it too');
+  assert.equal(back.set.images.length, 4);
+  const clamped = await call('save_layer_arrangement', { id: base.id, moves: { [one.id]: [5, -9] }, hidden: [] });
+  assert.deepEqual((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement.moves[one.id], [1, -1]);
+  // Only a set's base can be arranged, and only a set that exists.
+  assert.equal((await call('save_layer_arrangement', { id: one.id, moves: {}, hidden: [] })).result.isError, true);
+  assert.equal((await call('save_layer_arrangement', { id: 'img_nothing_here_000000000', moves: {}, hidden: [] })).result.isError, true);
+  assert.ok(clamped);
 });
