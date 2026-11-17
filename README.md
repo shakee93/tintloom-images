@@ -20,6 +20,20 @@ Add a key: run `/plugin`, open **tintloom**, choose **Configure**, and paste a k
 
 The plugin needs Node 18 or newer and has no dependencies.
 
+Setting it up with an AI agent: see [llms-install.md](llms-install.md).
+
+## Examples
+
+<p>
+  <img src="docs/examples/cat-selfie.jpg" width="200" alt="A ginger cat taking a selfie">
+  <img src="docs/examples/cat-selfie-shades.jpg" width="200" alt="The same photo with the cat wearing pixel sunglasses">
+  <img src="docs/examples/sticker-axolotl.png" width="200" alt="A sticker of an axolotl holding a mug, on a transparent background">
+</p>
+
+- Left: a photo of a cat taking a selfie.
+- Middle: the same photo after painting over the face and asking for "Give it sunglasses". Only the painted area changes.
+- Right: a sticker with a transparent background.
+
 ## What you can ask for
 
 - A new image: "a hero image for this landing page, 16:9, left side clear for the headline".
