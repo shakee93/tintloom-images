@@ -6,11 +6,11 @@ import { isIP } from 'node:net';
 import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { LAYERS_PROMPT, buildRequest, outputPaths, pickProvider } from '../skills/image/scripts/tintloom.mjs';
 import { readConfig, resolveKey, resolveSetting } from '../skills/image/scripts/lib/config.mjs';
-import { imageSize, maskFromRegions, clearUnderMask, keepOutsideMask, shrinkPng, resizeMask, onlyUnderMask } from '../skills/image/scripts/lib/png.mjs';
+import { imageSize, maskFromRegions, clearUnderMask, keepOutsideMask, shrinkPng, resizeMask, onlyUnderMask, stripMetadata } from '../skills/image/scripts/lib/png.mjs';
 import { UserError, extForMime, sniffMime } from '../skills/image/scripts/lib/util.mjs';
 import { getProvider, providers } from '../skills/image/scripts/providers/index.mjs';
 
-export const VERSION = '0.8.11';
+export const VERSION = '0.8.18';
 const PROTOCOL = '2025-06-18';
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 // Bigger images are not sent to the model inline: chat apps cap tool results.
@@ -29,18 +29,18 @@ export const CARD_MIME = 'text/html;profile=mcp-app';
  * below tells Claude to ask for a public link when the upload command cannot connect; set it to the tool's
  * name and that sentence points at the card instead. Nothing else needs to change.
  */
-export const UPLOAD_DROP_ZONE_TOOL = null;
+export const UPLOAD_DROP_ZONE_TOOL = 'generate_image';
 
-const UPLOAD_FALLBACK = UPLOAD_DROP_ZONE_TOOL
-  ? `ask the user to drop the image on the card (the ${UPLOAD_DROP_ZONE_TOOL} tool opens it), or to give you a public https link to it`
-  : 'suggest they give you a public https link to the image for now';
+/** What Claude says to the user when the sandbox blocks tintloom.com. The way to add the picture in the card comes from UPLOAD_DROP_ZONE_TOOL. */
+const UPLOAD_BLOCKED = (card) =>
+  `say it in one or two sentences: this sandbox blocks tintloom.com. On a paid Claude plan they can add tintloom.com to the allowed domains under Settings > Capabilities (on a Team or Enterprise plan an admin does it under Organization settings > Capabilities) and then ask again; or they can add the picture in the Tintloom card${card ? ` (call ${card} with \`add_image: true\`)` : ''}, or give you a public https link to it`;
 
 const UPLOAD_DESCRIPTION =
   'Get a one-time address to upload an image file to Tintloom, so the file can be edited, split into layers (`layers: true`) or used as a reference. ' +
-  'Use this when the user attached a file to the chat or has a local file AND you can run shell commands (a code sandbox, Claude Code, Cowork). Run the commands it returns on the file; the second one prints JSON `{ id, width, height }`; then pass that id as `images: [{ id }]` to generate_image. ' +
+  'Use this when the user attached a file to the chat or has a local file AND you can run shell commands (a code sandbox, Claude Code, Cowork). Run the shell snippet it returns on the file; it prints JSON `{ id, width, height }`; then pass that id as `images: [{ id }]` to generate_image. ' +
   'Never type an image as base64 into `data`: a real image is far too big for a tool call. ' +
-  'The address works once, for about 10 minutes, for one PNG, JPEG or WebP up to 25 MB, and uploading is free. It sends the file to a storage host named in the result as well as tintloom.com, so the sandbox must be allowed to reach both. ' +
-  `If the commands fail to connect (curl exits with 6, 7 or 28, or the answer says the host is blocked), tell the user plainly that this environment cannot reach Tintloom's upload address, and ${UPLOAD_FALLBACK}. Do not retry with base64.`;
+  'The address works once, for about 10 minutes, for one PNG, JPEG or WebP up to 25 MB, and uploading is free. Everything goes to tintloom.com and nowhere else, in pieces of 3.5 MB if the file is bigger. ' +
+  `If the snippet fails to connect (curl exit 6, 7, 28, 35 or 56, or the output says "CONNECT tunnel failed" or "connect_rejected"), ${UPLOAD_BLOCKED(UPLOAD_DROP_ZONE_TOOL)}. Do not retry with base64.`;
 
 const imageItem = {
   type: 'object',
@@ -57,7 +57,7 @@ const TOOLS = [
     name: 'generate_image',
     title: 'Generate image',
     description:
-      'Create an image from a text prompt, or edit or combine existing images when `images` is given. The result says whether the user can already see the image; follow it. Write a specific prompt: subject, setting, composition, style, lighting, and any exact text in quotes. For edits, say what changes and what must stay the same. Make one image unless the user asks for more: every image costs them money. When the user asks for several different images at once, make ONE call with `prompts` (one prompt per image), never several calls: they then appear together as one gallery. When the user asks to split or separate an image into layers, or to get its elements as separate transparent PNGs, call this with `layers: true` and that one image.',
+      'Create an image from a text prompt, or edit or combine existing images when `images` is given. The result says whether the user can already see the image; follow it. Write a specific prompt: subject, setting, composition, style, lighting, and any exact text in quotes. For edits, say what changes and what must stay the same. Make one image unless the user asks for more: every image costs them money. When the user asks for several different images at once, make ONE call with `prompts` (one prompt per image), never several calls: they then appear together as one gallery. When the user asks to split or separate an image into layers, or to get its elements as separate transparent PNGs, call this with `layers: true` and that one image. When the user attached a picture to the chat or says they have their own, and you cannot send it with get_upload_url (or that failed), call this with `add_image: true`: it opens the card so they can add it, and nothing is generated or charged.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -66,7 +66,9 @@ const TOOLS = [
           type: 'array', minItems: 2, maxItems: 4, items: { type: 'string' },
           description: 'Several different images in one go, one prompt each, shown together as one gallery. Use this in place of `prompt` when the user asks for more than one distinct image (for example an apple, a pear and cherries). For takes on a single prompt use `count`.',
         },
-        images: { type: 'array', description: 'Images to edit or use as references. Omit to create from text alone.', items: imageItem },
+        add_image: { type: 'boolean', description: 'The user wants to bring their own picture (one they attached to the chat, or a file of theirs) to edit, split into layers, cut out and so on: opens the card so they can drop, choose or paste it. Nothing is generated or charged and no prompt is needed. Use this when get_upload_url cannot be used or fails. Wait afterwards: a message with the new image id arrives, and you then call generate_image again with that id in `images`.' },
+        latest_upload: { type: 'boolean', description: 'Use the image the user most recently added to their Tintloom account (by upload on tintloom.com, in the card, or with get_upload_url) as the one to edit or split, without needing its id. Use it when the user says they uploaded an image on tintloom.com. Same as passing that image\'s id in `images`.' },
+        images: { type: 'array', description: 'Images to edit or use as references: ids this server gave, or a public https link. An image the user attached to the chat cannot be passed here: use add_image first. Omit to create from text alone.', items: imageItem },
         mask: { ...imageItem, description: 'Limits an edit to part of the first image: a PNG the same size as it, transparent where the change may happen. Usually the id from the card\'s Select area tool.' },
         edit_regions: {
           type: 'array',
@@ -109,6 +111,43 @@ const TOOLS = [
     },
   },
   {
+    name: 'open_image',
+    title: 'Add your own image',
+    description:
+      'The same as generate_image with `add_image: true`, which is the one to use. Opens the image card so the user can add their own picture: they drop a file on it, choose one, or paste one. Call this when the user attached a picture, photo or file to the chat (or says they have one) and wants it edited, split into layers, its background removed, resized and so on, and you cannot run commands to send it with get_upload_url, or that did not work. An image attached to the chat cannot reach this server any other way, and you must never pass it as base64 in `data`. Wait after calling it: a message from the user with the new image id arrives once the picture is added, and you then use that id in `images: [{ id }]`. On a local machine `images: [{ path }]` needs no upload.',
+    inputSchema: { type: 'object', properties: {} },
+    // Claude does not draw a card for this tool; generate_image with add_image does. Kept for apps that do, but not offered to the model.
+    _meta: { ui: { resourceUri: CARD_URI, visibility: ['app'] }, 'ui/resourceUri': CARD_URI },
+  },
+  {
+    name: 'upload_image_part',
+    title: 'Send a piece of an image the user added',
+    description: 'Used by the image card to send an image the user chose, in pieces. Not useful to call directly.',
+    inputSchema: { type: 'object', properties: { upload: { type: 'string' }, index: { type: 'integer', minimum: 0, maximum: 199 }, data: { type: 'string', description: 'Base64.' } }, required: ['upload', 'index', 'data'] },
+    _meta: { ui: { visibility: ['app'] } },
+  },
+  {
+    name: 'finish_image_upload',
+    title: 'Finish adding an image',
+    description: 'Used by the image card once every piece of an image the user chose has been sent. Not useful to call directly.',
+    inputSchema: { type: 'object', properties: { upload: { type: 'string' }, total: { type: 'integer', minimum: 1, maximum: 200 }, name: { type: 'string' } }, required: ['upload', 'total'] },
+    _meta: { ui: { visibility: ['app'] } },
+  },
+  {
+    name: 'get_upload_ticket',
+    title: 'Get an address to send an image the user added straight to Tintloom',
+    description: 'Used by the image card to send an image the user chose straight to the site instead of through the app. Not useful to call directly.',
+    inputSchema: { type: 'object', properties: {} },
+    _meta: { ui: { visibility: ['app'] } },
+  },
+  {
+    name: 'finish_direct_upload',
+    title: 'Open an image the card sent straight to Tintloom',
+    description: 'Used by the image card after it sent an image straight to the site: makes it the open image. Not useful to call directly.',
+    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The id the site gave the upload.' }, name: { type: 'string' } }, required: ['id'] },
+    _meta: { ui: { visibility: ['app'] } },
+  },
+  {
     name: 'save_mask',
     title: 'Save a selection mask',
     description: 'Used by the image card to store the area the user painted. Not useful to call directly.',
@@ -136,8 +175,20 @@ const TOOLS = [
   {
     name: 'save_layer_arrangement',
     title: 'Keep how layers were arranged',
-    description: 'Used by the image card to keep what the user moved and hid in a layer set, so it is there after a reload (and on the dashboard). Not useful to call directly.',
-    inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'The id of the set\'s base.' }, moves: { type: 'object' }, hidden: { type: 'array', items: { type: 'string' } } }, required: ['id'] },
+    description: 'Used by the image card to keep what the user moved, resized, turned, flipped, reordered and hid in a layer set, so it is there after a reload (and on the dashboard). Not useful to call directly.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The id of the set\'s base.' },
+        moves: { type: 'object', description: 'Layer id to [dx, dy]: how far its middle moved, as fractions of the base.' },
+        hidden: { type: 'array', items: { type: 'string' } },
+        scale: { type: 'object', description: 'Layer id to a size multiplier (0.05 to 10).' },
+        rotation: { type: 'object', description: 'Layer id to degrees clockwise.' },
+        flipX: { type: 'array', items: { type: 'string' }, description: 'Ids of layers mirrored left to right.' },
+        order: { type: 'array', items: { type: 'string' }, description: 'The layers\' ids from back to front.' },
+      },
+      required: ['id'],
+    },
     _meta: { ui: { visibility: ['app'] } },
   },
   {
@@ -156,30 +207,108 @@ const TOOLS = [
   },
 ];
 
+// ---------- how the user arranged a layer set (kept with the set; the dashboard keeps the same shape) ----------
+
+/** Degrees turned into (-180, 180]. */
+const normDeg = (r) => { const x = ((r % 360) + 360) % 360; return x > 180 ? x - 360 : x; };
+
+/**
+ * What may be kept of an arrangement from the card or the site. `ids` lists the set's images, the base first. Only known
+ * ids; finite numbers; a layer's middle moved within the picture (-1..1); a scale of 0.05..10; an angle in (-180, 180];
+ * an order that lists every layer once, back to front. What is left as it came is not kept, and the base has no scale,
+ * angle, flip or place in the order. Arrangements from before these existed have only `moves` and `hidden` and stay so.
+ * (web/lib/layer-types.ts has the same rules for the dashboard; a test holds the two together.)
+ */
+export function cleanArrangement(input, ids) {
+  const known = new Set(ids);
+  const layers = ids.slice(1);
+  const asLayer = new Set(layers);
+  const from = input && typeof input === 'object' ? input : {};
+  const entries = (v) => (v && typeof v === 'object' && !Array.isArray(v) ? Object.entries(v) : []);
+  const num = (v) => (typeof v === 'number' || typeof v === 'string' ? Number(v) : NaN);
+  const moves = {};
+  for (const [id, v] of entries(from.moves)) {
+    if (!known.has(id) || !Array.isArray(v)) continue;
+    const [dx, dy] = [Number(v[0]), Number(v[1])];
+    if (Number.isFinite(dx) && Number.isFinite(dy) && (dx || dy)) moves[id] = [Math.max(-1, Math.min(1, dx)), Math.max(-1, Math.min(1, dy))];
+  }
+  const hidden = Array.isArray(from.hidden) ? [...new Set(from.hidden.filter((h) => typeof h === 'string' && known.has(h)))] : [];
+  const out = { moves, hidden };
+  const scale = {};
+  // `scales` is the name the first version of sizes (0.8.17) used; it is read as `scale` and never written.
+  for (const [id, v] of [...entries(from.scales), ...entries(from.scale)]) {
+    const n = num(v);
+    if (!asLayer.has(id) || !Number.isFinite(n) || n <= 0) continue;
+    const s = Math.round(Math.min(10, Math.max(0.05, n)) * 10000) / 10000;
+    if (s !== 1) scale[id] = s;
+  }
+  if (Object.keys(scale).length) out.scale = scale;
+  const rotation = {};
+  for (const [id, v] of entries(from.rotation)) {
+    const n = num(v);
+    if (!asLayer.has(id) || !Number.isFinite(n)) continue;
+    const r = Math.round(normDeg(n) * 100) / 100;
+    if (r) rotation[id] = r;
+  }
+  if (Object.keys(rotation).length) out.rotation = rotation;
+  if (Array.isArray(from.flipX)) {
+    const flip = [...new Set(from.flipX.filter((h) => typeof h === 'string' && asLayer.has(h)))];
+    if (flip.length) out.flipX = flip;
+  }
+  if (Array.isArray(from.order)) {
+    const given = [...new Set(from.order.filter((h) => typeof h === 'string' && asLayer.has(h)))];
+    const order = [...given, ...layers.filter((h) => !given.includes(h))];
+    if (order.some((h, i) => h !== layers[i])) out.order = order;
+  }
+  return out;
+}
+
 // ---------- uploading an image file the agent has on disk ----------
 
-/** The commands and notes Claude is given for one upload address. `t` comes from the host: { putUrl, doneUrl, expiresInSeconds, maxBytes }. */
+/** Parts of a file bigger than this are sent one request each: a request here may hold about 4.5 MB. */
+export const UPLOAD_PART_BYTES = 3_500_000;
+
+/**
+ * The shell snippet for one upload address, `base` being https://<site>/api/upload/<token>. It works in sh or bash with curl and
+ * coreutils, on Linux and macOS: a file of at most 3.5 MB is one request to /done; a bigger one is split into 3.5 MB pieces,
+ * each sent to /part/<n>, then /done?parts=<count> puts them together. Only the final JSON is printed; a failure prints curl's
+ * message or the server's, and keeps curl's exit code. It runs in its own bash, so `set -e` cannot end the agent's shell.
+ */
+export function uploadSnippet(base, file = '/path/to/file') {
+  const quoted = `'${String(file).replace(/'/g, `'\\''`)}'`;
+  return [
+    `f=${quoted} bash <<'TINTLOOM_UPLOAD'`,
+    'set -e',
+    `u='${base}'`,
+    // The body is declared as binary: left to curl's default (a form), the hosting platform refuses a large one before it reaches us.
+    'post() { r=$(curl -sS --fail-with-body -X POST -H "content-type: application/octet-stream" --data-binary "$2" "$1") || { c=$?; echo "$r" >&2; exit $c; }; }',
+    'n=$(wc -c < "$f" | tr -d " ")',
+    `if [ "$n" -le ${UPLOAD_PART_BYTES} ]; then post "$u/done" @"$f"`,
+    // Pieces are read straight from the file and piped: no temporary files, so nothing to remove afterwards.
+    'else i=0; o=0',
+    `  while [ "$o" -lt "$n" ]; do tail -c +$((o+1)) "$f" | head -c ${UPLOAD_PART_BYTES} | post "$u/part/$i" @-; i=$((i+1)); o=$((o+${UPLOAD_PART_BYTES})); done`,
+    '  post "$u/done?parts=$i"',
+    'fi',
+    'echo "$r"',
+    'TINTLOOM_UPLOAD',
+  ].join('\n');
+}
+
+/** The snippet and notes Claude is given for one upload address. `t` comes from the host: { uploadUrl, expiresInSeconds, maxBytes }. */
 function uploadAnswer(t, args) {
   const name = String(args?.filename || '').replace(/[^\w.\- ]/g, '').slice(0, 80);
-  const mime = ['image/png', 'image/jpeg', 'image/webp'].includes(args?.mime)
-    ? args.mime
-    : /\.jpe?g$/i.test(name) ? 'image/jpeg' : /\.webp$/i.test(name) ? 'image/webp' : 'image/png';
-  const file = name ? `/path/to/${name.includes(' ') ? `'${name}'` : name}` : '/path/to/file';
-  const put = `curl -sS --fail-with-body -X PUT --data-binary @${file} -H 'content-type: ${mime}' '${t.putUrl}'`;
-  const done = `curl -sS --fail-with-body -X POST '${t.doneUrl}'`;
-  const command = `${put} && echo && ${done}`;
+  const command = uploadSnippet(t.uploadUrl, name ? `/path/to/${name}` : '/path/to/file');
   const mb = Math.round(t.maxBytes / 1024 / 1024);
   const text = [
-    `Run this on the image file (replace the path; set the content-type to match the file: image/png, image/jpeg or image/webp):`,
+    'Run this on the image file (replace the path in `f=`). It sends the file to tintloom.com, in pieces if it is bigger than 3.5 MB, and prints only JSON { "id": "img_...", "width": ..., "height": ... }:',
     '',
     command,
     '',
-    `It runs two requests: the first sends the file to storage (${new URL(t.putUrl).hostname}), the second finishes the upload on ${new URL(t.doneUrl).hostname}. The second answers with JSON { "id": "img_...", "width": ..., "height": ... }.`,
     'Then call generate_image with `images: [{ id }]` and the prompt (also with `layers: true` to split it into layers). The id works like the id of an image Tintloom made, and uploading costs nothing.',
     `The address works once and expires in ${Math.round(t.expiresInSeconds / 60)} minutes; the file must be a PNG, JPEG or WebP of at most ${mb} MB. Very large images are shrunk to 8192 pixels on the long side and photo metadata (location, camera) is removed.`,
-    `If a command fails: curl exit 6, 7 or 28 means this environment cannot reach the address, so tell the user plainly and ${UPLOAD_FALLBACK}. Any other answer is a message to pass on; ask for a new address if this one was used or expired. Never type the image as base64.`,
+    `If it fails with curl exit 6, 7, 28, 35 or 56, or the output says "CONNECT tunnel failed" or "connect_rejected", ${UPLOAD_BLOCKED(UPLOAD_DROP_ZONE_TOOL)}. Any other answer is a message to pass on; ask for a new address if this one was used or expired. Never type the image as base64.`,
   ].join('\n');
-  return { content: [{ type: 'text', text }], structuredContent: { command, put_url: t.putUrl, done_url: t.doneUrl, expires_in_seconds: t.expiresInSeconds, max_bytes: t.maxBytes } };
+  return { content: [{ type: 'text', text }], structuredContent: { command, upload_url: t.uploadUrl, expires_in_seconds: t.expiresInSeconds, max_bytes: t.maxBytes } };
 }
 
 async function getUploadUrl(args, ctx) {
@@ -190,9 +319,12 @@ async function getUploadUrl(args, ctx) {
   throw new UserError('Uploading is not available here. Pass an image id, a public https URL or small base64 data.');
 }
 
+/** The card's two tools for sending an image straight to the site: only a host that issues upload addresses has a site to send it to. */
+const DIRECT_UPLOAD_TOOLS = ['get_upload_ticket', 'finish_direct_upload'];
+
 /** Listed only where it can work: a host that issues upload addresses, or the local server that can read paths. */
 const toolsFor = (ctx) =>
-  TOOLS.filter((t) => t.name !== 'get_upload_url' || ctx.uploads?.ticket || ctx.mode === 'stdio').map((t) =>
+  TOOLS.filter((t) => (t.name !== 'get_upload_url' || ctx.uploads?.ticket || ctx.mode === 'stdio') && (!DIRECT_UPLOAD_TOOLS.includes(t.name) || ctx.uploads?.ticket)).map((t) =>
     t.name === 'get_upload_url' && !ctx.uploads?.ticket
       ? { ...t, description: 'Answers how to give this server an image file: it runs on the user\'s machine and reads files directly, so pass the file\'s path in `images: [{ path }]` to generate_image. No upload is needed.', inputSchema: { type: 'object', properties: {} } }
       : t);
@@ -216,6 +348,54 @@ export function progressKey(args) {
 
 /** Display-size copies made for `get_generated_image` with `edge`, so the pieces of one copy are not made again for each piece. */
 const viewCache = new Map();
+
+// ---------- an image the user adds in the card (open_image) ----------
+
+/** The pieces of images being added, when the host does not keep them elsewhere (ctx.cardUploads). Kept briefly, and few. */
+const memoryUploadParts = new Map();
+const uploadParts = {
+  async put(upload, index, data) {
+    memoryUploadParts.set(`${upload}:${index}`, data);
+    while (memoryUploadParts.size > 400) memoryUploadParts.delete(memoryUploadParts.keys().next().value);
+  },
+  async get(upload, index) {
+    return memoryUploadParts.get(`${upload}:${index}`) ?? null;
+  },
+  async clear(upload, total) {
+    for (let i = 0; i < total; i++) memoryUploadParts.delete(`${upload}:${i}`);
+  },
+};
+
+export const UPLOAD_TYPES = ['image/png', 'image/jpeg', 'image/webp'];
+
+/**
+ * What a host without its own rules does with an image the user added: check what it is from its bytes, take its metadata
+ * out (PNG and JPEG; a WebP is kept as it is, which is the one thing this does not clean), and keep it like a generated
+ * image. A host that sells the service replaces this (ctx.cardUploads.accept) with limits and a proper re-encode.
+ */
+async function acceptUpload(bytes, ctx) {
+  if (bytes.length > MAX_INPUT_BYTES) throw new UserError('That image is larger than 20 MB.');
+  const mime = sniffMime(bytes);
+  if (!UPLOAD_TYPES.includes(mime)) throw new UserError('That file is not a PNG, JPEG or WebP image.', 'Choose a PNG, JPEG or WebP picture.');
+  const size = imageSize(bytes);
+  if (!size || !size.width || !size.height || size.width * size.height > 100_000_000) throw new UserError('That image cannot be read, or is too large to use.');
+  const clean = stripMetadata(bytes);
+  const id = await ctx.store.put({ bytes: clean, mime });
+  return { id, mime, width: size.width, height: size.height, bytes: clean.length };
+}
+
+/** The answer for an image the user added: it becomes the card's open image, and the card gets what it needs to show it. */
+async function uploadedCard(made, ctx) {
+  // The picture is now the card's open image, so `selection: true` works at once.
+  await (ctx.progress || memoryProgress).set('selection', { image: made.id, mask: null, regions: null, erase: false, at: Date.now(), used: false }).catch(() => {});
+  const ext = extForMime(made.mime);
+  const record = { id: made.id, mime: made.mime, bytes: made.bytes, width: made.width, height: made.height, uploaded: true, ...(ctx.mode === 'http' && ctx.baseUrl && { url: `${ctx.baseUrl}/files/${made.id}.${ext}`, src: `${ctx.baseUrl}/files/${made.id}.${ext}` }), ...(ctx.mode !== 'http' && ctx.fileUrl && { src: ctx.fileUrl(made.id) }) };
+  const cardData = { provider: 'upload', providerLabel: 'Your image', model: 'upload', prompt: '', edited: false, uploaded: true, images: [record] };
+  return {
+    content: [{ type: 'text', text: `The user added their image. Its id is ${made.id} (${made.width}x${made.height}). Use \`images: [{ id: "${made.id}" }]\` to edit it or split it into layers, or \`selection: true\`.\ntintloom-card:${JSON.stringify(cardData)}` }],
+    structuredContent: { ...cardData, id: made.id },
+  };
+}
 
 const progressLog = new Map();
 const memoryProgress = {
@@ -265,7 +445,21 @@ export class ImageStore {
 const PRIVATE_V4 = [/^0\./, /^10\./, /^127\./, /^169\.254\./, /^172\.(1[6-9]|2\d|3[01])\./, /^192\.168\./, /^192\.0\.0\./, /^198\.1[89]\./, /^100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./, /^(22[4-9]|2[3-5]\d)\./];
 const isPrivate = (ip) => (isIP(ip) === 4 ? PRIVATE_V4.some((r) => r.test(ip)) : /^(::1?$|f[cd]|fe[89ab]|fec|::ffff:|64:ff9b:)/i.test(ip));
 
-/** Fetch a user-supplied image URL without letting it reach private networks. */
+/** A link to one of our own stored images (tintloom.com/files/<id>.png): its id, else null. */
+const ownImageId = (raw) => {
+  try {
+    const url = new URL(raw);
+    const m = /^\/files\/(img_[A-Za-z0-9_-]+)(?:\.png)?$/.exec(url.pathname);
+    return m && /(^|\.)tintloom\.com$/.test(url.hostname) ? m[1] : null;
+  } catch {
+    return null;
+  }
+};
+
+/**
+ * Fetch a user-supplied image URL without letting it reach private networks. Redirects are followed by hand,
+ * at most five, and every hop is checked the same way as the first, so a public address cannot send us inside.
+ */
 async function fetchPublicImage(raw, allowPrivate, lookupHost) {
   let url;
   try {
@@ -273,13 +467,26 @@ async function fetchPublicImage(raw, allowPrivate, lookupHost) {
   } catch {
     throw new UserError(`Not a valid image URL: ${raw}`);
   }
-  if (!allowPrivate) {
-    if (url.protocol !== 'https:' || url.port || url.username || url.password) throw new UserError('Image URLs must be plain https addresses.');
-    const addresses = lookupHost ? await lookupHost(url.hostname).catch(() => []) : [];
-    if (isIP(url.hostname) || !addresses.length || addresses.some(isPrivate)) throw new UserError(`Image URL is not reachable from here: ${url.hostname}`);
+  const first = url.hostname;
+  let res = null;
+  for (let hop = 0; hop <= 5; hop++) {
+    if (!allowPrivate) {
+      if (url.protocol !== 'https:' || url.port || url.username || url.password) throw new UserError('Image URLs must be plain https addresses.');
+      const addresses = lookupHost ? await lookupHost(url.hostname).catch(() => []) : [];
+      if (isIP(url.hostname) || !addresses.length || addresses.some(isPrivate)) throw new UserError(`Image URL is not reachable from here: ${url.hostname}`);
+    }
+    res = await fetch(url, { redirect: 'manual', signal: AbortSignal.timeout(30_000) }).catch(() => null);
+    const next = res && res.status >= 300 && res.status < 400 && res.headers.get('location');
+    if (!next) break;
+    await res.body?.cancel().catch(() => {});
+    try {
+      url = new URL(next, url);
+    } catch {
+      throw new UserError(`Could not fetch the image at ${first}.`);
+    }
+    res = null;
   }
-  const res = await fetch(url, { redirect: allowPrivate ? 'follow' : 'error', signal: AbortSignal.timeout(30_000) }).catch(() => null);
-  if (!res?.ok) throw new UserError(`Could not fetch the image at ${url.hostname}.`);
+  if (!res?.ok) throw new UserError(`Could not fetch the image at ${first}.`, 'The link may need a sign-in or may not point straight at an image file.');
   // Stop reading as soon as the file is larger than we accept, however large the server says it is.
   if (Number(res.headers.get('content-length') || 0) > MAX_INPUT_BYTES) throw new UserError('That image is larger than 20 MB.');
   const chunks = [];
@@ -305,7 +512,11 @@ async function loadInputs(items = [], ctx) {
       bytes = await readFile(file).catch(() => {
         throw new UserError(`Input image not found: ${item.path}`);
       });
-    } else if (item?.url) bytes = await fetchPublicImage(item.url, ctx.env.TINTLOOM_ALLOW_PRIVATE_URLS === '1', ctx.lookupHost);
+    } else if (item?.url) {
+      // A link to an image we already hold is read from the store: no round trip, and it works for the owner's private images.
+      const own = ownImageId(item.url);
+      bytes = (own && (await ctx.store.get(own).catch(() => null))?.bytes) || (await fetchPublicImage(item.url, ctx.env.TINTLOOM_ALLOW_PRIVATE_URLS === '1', ctx.lookupHost));
+    }
     else if (item?.data) bytes = Buffer.from(item.data, 'base64');
     if (!bytes) throw new UserError(`images[${i}] needs an id, path, url or data.`);
     if (bytes.length > MAX_INPUT_BYTES) throw new UserError(`images[${i}] is larger than 20 MB.`);
@@ -459,7 +670,23 @@ async function splitIntoLayers(args, ctx, config) {
   };
 }
 
+/** The card in its "add your image" state: nothing is made, reserved or charged. Same answer for generate_image with add_image and for open_image. */
+function openAddImage(ctx) {
+  const where = ctx.mode === 'stdio' ? ' On this machine you can also pass `images: [{ path }]` for a file on disk.' : '';
+  // On the hosted service the card also offers a page on the site for when the file cannot be added in the card itself.
+  const page = ctx.mode === 'http' && ctx.baseUrl ? `${ctx.baseUrl}/upload` : null;
+  const elsewhere = page ? ' If the user says they uploaded it on tintloom.com instead, call generate_image with `latest_upload: true` (their newest upload) or with the id they give in `images`.' : '';
+  return {
+    content: [{ type: 'text', text: `The user is adding their image in the card (drop, choose or paste). Wait: a message with the new image id will arrive, then use that id in \`images: [{ id }]\` for what they asked.${where}${elsewhere} Do not describe the card or ask for the file in chat.` }],
+    structuredContent: { upload: 'open', types: UPLOAD_TYPES, ...(page && { uploadPage: page }) },
+  };
+}
+
 async function generateImage(args0, ctx) {
+  if (args0.add_image === true) return openAddImage(ctx);
+  // `latest_upload` is turned into the id of the account's newest upload by a host that keeps them (the hosted service does,
+  // before this runs); here it means there was none to use.
+  if (args0.latest_upload === true && !args0.images?.length) throw new UserError('There is no uploaded image to use yet.', 'Call generate_image with add_image: true so the user can add one, or pass the image\'s id in `images`.');
   const args = await withSelection(args0, ctx);
   const { env, mode, store } = ctx;
   const config = await readConfig(env);
@@ -677,11 +904,52 @@ async function callTool(name, args = {}, ctx) {
       const state = await (ctx.progress || memoryProgress).get(String(args.key || '')).catch(() => null);
       return { content: [{ type: 'text', text: 'progress' }], structuredContent: state || { images: [] } };
     }
+    if (name === 'open_image') return openAddImage(ctx);
+    if (name === 'upload_image_part') {
+      const upload = String(args.upload || '');
+      const index = Math.floor(Number(args.index));
+      if (!/^[a-z0-9]{16,32}$/.test(upload) || !(index >= 0 && index < 200) || typeof args.data !== 'string' || !args.data || args.data.length > 400_000) throw new UserError('That piece of the image could not be saved.');
+      await (ctx.cardUploads?.put || uploadParts.put)(upload, index, args.data);
+      return { content: [{ type: 'text', text: 'saved' }], structuredContent: { saved: true } };
+    }
+    if (name === 'finish_image_upload') {
+      const upload = String(args.upload || '');
+      const total = Math.floor(Number(args.total));
+      if (!/^[a-z0-9]{16,32}$/.test(upload) || !(total >= 1 && total <= 200)) throw new UserError('That image could not be added.');
+      const parts = ctx.cardUploads || uploadParts;
+      const pieces = [];
+      for (let i = 0; i < total; i++) {
+        const piece = await parts.get(upload, i);
+        if (typeof piece !== 'string') throw new UserError(`Piece ${i + 1} of ${total} did not arrive.`, 'Add the image again.');
+        pieces.push(piece);
+      }
+      await (parts.clear || uploadParts.clear)(upload, total).catch(() => {});
+      const made = await (ctx.cardUploads?.accept || ((bytes) => acceptUpload(bytes, ctx)))(Buffer.from(pieces.join(''), 'base64'));
+      return uploadedCard(made, ctx);
+    }
+    if (name === 'get_upload_ticket') {
+      if (!ctx.uploads?.ticket) throw new UserError('Sending an image straight to Tintloom is not available here.');
+      const t = await ctx.uploads.ticket({});
+      // The address is the one credential, and it is given only to the card that asked, here.
+      return { content: [{ type: 'text', text: 'ticket' }], structuredContent: { upload_url: t.uploadUrl, expires_in_seconds: t.expiresInSeconds, max_bytes: t.maxBytes, part_bytes: UPLOAD_PART_BYTES } };
+    }
+    if (name === 'finish_direct_upload') {
+      if (!ctx.uploads?.ticket) throw new UserError('Sending an image straight to Tintloom is not available here.');
+      const id = String(args.id || '');
+      if (!/^img_[A-Za-z0-9_-]{8,40}$/.test(id)) throw new UserError('That image could not be added.');
+      const stored = await ctx.store.get(id).catch(() => null);
+      const size = stored && imageSize(stored.bytes);
+      if (!stored || !size) throw new UserError('That image could not be added.', 'Add the image again.');
+      // The site already checked and cleaned it (the same finishing step as get_upload_url); this only opens it in the card.
+      return uploadedCard({ id, mime: stored.mime, width: size.width, height: size.height, bytes: stored.bytes.length }, ctx);
+    }
     if (name === 'get_layer_set') {
       const notes = ctx.progress || memoryProgress;
       const set = await notes.get(`layerset-${String(args.id || '')}`).catch(() => null);
       // What the user moved and hid, kept under the base's id (the dashboard reads and writes the same note).
-      const arrangement = set?.images?.[0]?.id ? await notes.get(`layerarr-${set.images[0].id}`).catch(() => null) : null;
+      // Read through the cleaning, so an arrangement kept in an older shape (0.8.17's `scales`) comes back in the one shape.
+      const kept = set?.images?.[0]?.id ? await notes.get(`layerarr-${set.images[0].id}`).catch(() => null) : null;
+      const arrangement = kept ? cleanArrangement(kept, set.images.map((i) => i.id)) : null;
       return { content: [{ type: 'text', text: set ? 'layer set' : 'no layer set' }], structuredContent: { set: set || null, arrangement: arrangement || null } };
     }
     if (name === 'save_layer_arrangement') {
@@ -689,14 +957,7 @@ async function callTool(name, args = {}, ctx) {
       const id = String(args.id || '');
       const set = await notes.get(`layerset-${id}`).catch(() => null);
       if (!set?.images?.length || set.images[0].id !== id) throw new UserError('That layer set is not available.');
-      const known = new Set(set.images.map((i) => i.id));
-      const moves = {};
-      for (const [key, v] of Object.entries(args.moves && typeof args.moves === 'object' ? args.moves : {})) {
-        const [dx, dy] = Array.isArray(v) ? [Number(v[0]), Number(v[1])] : [NaN, NaN];
-        if (known.has(key) && Number.isFinite(dx) && Number.isFinite(dy) && (dx || dy)) moves[key] = [Math.max(-1, Math.min(1, dx)), Math.max(-1, Math.min(1, dy))];
-      }
-      const hidden = [...new Set((Array.isArray(args.hidden) ? args.hidden : []).filter((h) => typeof h === 'string' && known.has(h)))];
-      await notes.set(`layerarr-${id}`, { moves, hidden });
+      await notes.set(`layerarr-${id}`, cleanArrangement(args, set.images.map((i) => i.id)));
       return { content: [{ type: 'text', text: 'saved' }], structuredContent: { saved: true } };
     }
     if (name === 'get_generated_image') {
@@ -771,6 +1032,7 @@ export async function handleMessage(msg, ctx) {
           'Messages from the image card say "this image" or "the selected area" and give no id: call generate_image with `selection: true` and leave out `images`, `mask` and `erase`. The server knows which image is open and what the user painted, and whether it is an erase. For a selected area, write the change as the prompt and name the object it is about if you can tell ("make the kite red"); it keeps its shape and position.',
           'One part only, without the card: add `mask` or `edit_regions`; everything outside is kept exactly. Name the object inside the area in the prompt ("make the kite red", not "make it red"). To remove something: the same, plus `erase: true`.',
           'Remove the background: provider openai, model gpt-image-1.5, background transparent, fidelity high. New shape: `aspect`, with a prompt to keep the scene and extend it. Variations: `count`. Several different images at once: `prompts`, one prompt each, shown as one gallery.',
+          'The user\'s own picture: an image attached to the chat cannot be read here. If you can run commands, get_upload_url sends it; otherwise (or if that fails) call generate_image with `add_image: true` so the user can add it in the card, wait for their message with the new image id, then use it in `images`. Never pass an attached image as base64.',
           'Make one image per request unless asked for more: each image costs the user money.',
           ...(ctx.instructions || []),
         ].join('\n'),

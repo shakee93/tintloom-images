@@ -9,10 +9,12 @@ import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import { randomBytes } from 'node:crypto';
 import { deflateSync } from 'node:zlib';
+import { uploadSnippet } from '../plugins/tintloom/server/core.mjs';
 import { CARD_URI, DiskImageStore, ImageStore, createHttpServer, handleMessage, makePreview } from '../plugins/tintloom/server/tintloom-mcp.mjs';
 import { outputPaths } from '../plugins/tintloom/skills/image/scripts/tintloom.mjs';
-import { decodePng, encodePng, imageSize, maskFromRegions, shrinkPng } from '../plugins/tintloom/skills/image/scripts/lib/png.mjs';
+import { decodePng, encodePng, imageSize, maskFromRegions, shrinkPng, stripMetadata } from '../plugins/tintloom/skills/image/scripts/lib/png.mjs';
 import { nearestAspect, sizeForRatio, sniffMime } from '../plugins/tintloom/skills/image/scripts/lib/util.mjs';
 import { buildBody, collectImages } from '../plugins/tintloom/skills/image/scripts/providers/gemini.mjs';
 import { openaiSize } from '../plugins/tintloom/skills/image/scripts/providers/openai.mjs';
@@ -301,11 +303,14 @@ test('MCP: get_upload_url on the local server says to pass the path; where it ca
   const refused = await handleMessage({ jsonrpc: '2.0', id: 4, method: 'tools/call', params: { name: 'get_upload_url', arguments: {} } }, remote);
   assert.equal(refused.result.isError, true);
   // A host that issues addresses lists it with the full description and answers with its commands.
-  const host = { ...remote, uploads: { ticket: async () => ({ putUrl: 'https://files.example/put?token=a', doneUrl: 'https://tintloom.example/api/upload/t/done', expiresInSeconds: 600, maxBytes: 25 * 1024 * 1024 }) } };
+  const host = { ...remote, uploads: { ticket: async () => ({ uploadUrl: 'https://tintloom.example/api/upload/tok.en', expiresInSeconds: 600, maxBytes: 25 * 1024 * 1024 }) } };
   const listed = (await handleMessage({ jsonrpc: '2.0', id: 5, method: 'tools/list' }, host)).result.tools.find((t) => t.name === 'get_upload_url');
   assert.match(listed.description, /one-time address/);
-  const got = await handleMessage({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'get_upload_url', arguments: { mime: 'image/webp' } } }, host);
-  assert.equal(got.result.structuredContent.command, "curl -sS --fail-with-body -X PUT --data-binary @/path/to/file -H 'content-type: image/webp' 'https://files.example/put?token=a' && echo && curl -sS --fail-with-body -X POST 'https://tintloom.example/api/upload/t/done'");
+  const got = await handleMessage({ jsonrpc: '2.0', id: 6, method: 'tools/call', params: { name: 'get_upload_url', arguments: { filename: 'a b.png' } } }, host);
+  const sc = got.result.structuredContent;
+  assert.equal(sc.upload_url, 'https://tintloom.example/api/upload/tok.en');
+  assert.equal(sc.command, uploadSnippet('https://tintloom.example/api/upload/tok.en', '/path/to/a b.png'));
+  assert.ok(got.result.content[0].text.includes(sc.command));
 });
 
 test('MCP: handshake, tools, and a notification gets no reply', async () => {
@@ -314,9 +319,16 @@ test('MCP: handshake, tools, and a notification gets no reply', async () => {
   assert.equal(init.result.serverInfo.name, 'tintloom');
   assert.equal(await handleMessage({ jsonrpc: '2.0', method: 'notifications/initialized' }, ctx), null);
   const tools = await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx);
-  assert.deepEqual(tools.result.tools.map((t) => t.name), ['generate_image', 'list_image_providers', 'get_upload_url', 'save_mask', 'save_selection', 'get_progress', 'save_layer_arrangement', 'get_layer_set', 'get_generated_image']);
+  assert.deepEqual(tools.result.tools.map((t) => t.name), ['generate_image', 'list_image_providers', 'get_upload_url', 'open_image', 'upload_image_part', 'finish_image_upload', 'save_mask', 'save_selection', 'get_progress', 'save_layer_arrangement', 'get_layer_set', 'get_generated_image']);
   assert.equal(tools.result.tools[0]._meta.ui.resourceUri, CARD_URI);
   assert.deepEqual(tools.result.tools[4]._meta.ui.visibility, ['app']);
+  // The card's tools for sending an image straight to the site are not listed where there is no site to send it to, and refuse if called.
+  assert.ok(!tools.result.tools.some((t) => t.name === 'get_upload_ticket' || t.name === 'finish_direct_upload'));
+  const noTicket = await handleMessage({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'get_upload_ticket', arguments: {} } }, ctx);
+  assert.equal(noTicket.result.isError, true);
+  assert.match(noTicket.result.content[0].text, /not available here/);
+  const noFinish = await handleMessage({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'finish_direct_upload', arguments: { id: 'img_abcdefghijkl' } } }, ctx);
+  assert.equal(noFinish.result.isError, true);
   const card = await handleMessage({ jsonrpc: '2.0', id: 4, method: 'resources/read', params: { uri: CARD_URI } }, ctx);
   assert.equal(card.result.contents[0].mimeType, 'text/html;profile=mcp-app');
   assert.match(card.result.contents[0].text, /ui\/initialize/);
@@ -837,8 +849,201 @@ test('layer arrangement (engine): what the user moved and hid is kept with the s
   assert.equal(back.set.images.length, 4);
   const clamped = await call('save_layer_arrangement', { id: base.id, moves: { [one.id]: [5, -9] }, hidden: [] });
   assert.deepEqual((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement.moves[one.id], [1, -1]);
+  // Sizes (`scale`) and the order from back to front are kept the same way: known layers only, never the base, sizes within bounds.
+  // 0.8.17 called the sizes `scales`: that name is still read, and always comes back as `scale`.
+  await call('save_layer_arrangement', { id: base.id, moves: {}, hidden: [], scales: { [one.id]: 1.5, [two.id]: 1, [base.id]: 2, nope: 3 }, order: [two.id, one.id, two.id, base.id, 'nope', 4] });
+  const kept2 = (await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement;
+  assert.deepEqual([kept2.scale, kept2.order.slice(0, 2), kept2.order.length], [{ [one.id]: 1.5 }, [two.id, one.id], 3], 'the layers left out of the order follow it');
+  await call('save_layer_arrangement', { id: base.id, moves: {}, hidden: [], scale: { [one.id]: 99, [two.id]: 0.001 }, order: [] });
+  assert.deepEqual((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement, { moves: {}, hidden: [], scale: { [one.id]: 10, [two.id]: 0.05 } }, 'and a reset (no sizes, no order) leaves neither behind');
+  const { cleanArrangement } = await import('../plugins/tintloom/server/core.mjs');
+  assert.deepEqual(cleanArrangement({ moves: {}, hidden: [], scales: { [one.id]: 2 }, order: [two.id, one.id] }, [base.id, one.id, two.id]), { moves: {}, hidden: [], scale: { [one.id]: 2 } , order: [two.id, one.id] }, '0.8.17\'s shape is read as the one shape');
+  await call('save_layer_arrangement', { id: base.id, moves: {}, hidden: [] });
+  assert.deepEqual((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement, { moves: {}, hidden: [] });
   // Only a set's base can be arranged, and only a set that exists.
   assert.equal((await call('save_layer_arrangement', { id: one.id, moves: {}, hidden: [] })).result.isError, true);
   assert.equal((await call('save_layer_arrangement', { id: 'img_nothing_here_000000000', moves: {}, hidden: [] })).result.isError, true);
   assert.ok(clamped);
+});
+
+test('layer arrangement (engine): size, turn, flip and order are kept with the set and cleaned; the old shape reads back as it was', async () => {
+  const ctx = { env: env({ TINTLOOM_MODELARK_KEY: 'm-test-123456' }), mode: 'stdio', store: new ImageStore(), projectDir: dir, session: { ui: true } };
+  const call = (name, args) => handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, ctx);
+  await writeFile(join(dir, 'arr2.png'), BIG);
+  const made = await call('generate_image', { images: [{ path: 'arr2.png' }], layers: true, out: 'layers-arr2/' });
+  const [base, one, two, three] = made.result.structuredContent.images;
+  const tool = (await handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, ctx)).result.tools.find((t) => t.name === 'save_layer_arrangement');
+  for (const key of ['scale', 'rotation', 'flipX', 'order']) assert.ok(tool.inputSchema.properties[key], `the tool takes ${key}`);
+  const saved = await call('save_layer_arrangement', { id: base.id, moves: { [one.id]: [0.1, 0] }, hidden: [], scale: { [one.id]: 1.5, [two.id]: 99, [base.id]: 2, nope: 3 }, rotation: { [one.id]: 400, [two.id]: 0 }, flipX: [two.id, 'nope'], order: [three.id, one.id] });
+  assert.equal(saved.result.isError, undefined, JSON.stringify(saved));
+  const back = (await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement;
+  assert.deepEqual(back, { moves: { [one.id]: [0.1, 0] }, hidden: [], scale: { [one.id]: 1.5, [two.id]: 10 }, rotation: { [one.id]: 40 }, flipX: [two.id], order: [three.id, one.id, two.id] });
+  // Everything back at its default is the old, small shape again.
+  await call('save_layer_arrangement', { id: base.id, moves: {}, hidden: [], scale: { [one.id]: 1 }, rotation: { [one.id]: 360 }, flipX: [], order: [one.id, two.id, three.id] });
+  assert.deepEqual((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement, { moves: {}, hidden: [] });
+  // A call that knows only moves and hidden (an older card) still works.
+  await call('save_layer_arrangement', { id: base.id, moves: { [two.id]: [0, 0.2] }, hidden: [one.id] });
+  assert.deepEqual((await call('get_layer_set', { id: base.id })).result.structuredContent.arrangement, { moves: { [two.id]: [0, 0.2] }, hidden: [one.id] });
+});
+
+test('layer card: the frame, the handles and the icon bar are there; export draws turned, mirrored, scaled layers back to front', async () => {
+  const card = await readFile(new URL('../plugins/tintloom/server/ui/image-card.html', import.meta.url), 'utf8');
+  for (const id of ['t-left', 't-right', 't-flip', 't-front', 't-back', 't-dl', 't-hide', 't-reset']) assert.match(card, new RegExp(`id="${id}"[^>]*aria-label="[^"]+"`), `${id} is a labelled button`);
+  assert.match(card, /title="Download original layer"/);
+  assert.match(card, /data-handle="rotate"/);
+  assert.match(card, /ctx\.rotate\(\(item\.r \* Math\.PI\) \/ 180\);\s*ctx\.scale\(item\.fx \? -item\.s : item\.s, item\.s\)/, 'the export applies each layer\'s turn, mirror and scale');
+  assert.match(card, /for \(const index of \[0, \.\.\.L\.order\]\)/, 'back to front');
+  assert.doesNotMatch(card, /Duplicate/, 'no duplicate: a copy would need an image of its own in the set');
+});
+
+// ---- An image the user adds in the card (open_image): sent in pieces, kept, usable at once ----
+const CRC_T = Array.from({ length: 256 }, (_, n) => { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; return c >>> 0; });
+const crcBytes = (buf) => { let c = 0xffffffff; for (const b of buf) c = CRC_T[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
+const withTextChunk = (png, text) => {
+  const body = Buffer.concat([Buffer.from('tEXt'), Buffer.from(text)]);
+  const chunk = Buffer.alloc(body.length + 8);
+  chunk.writeUInt32BE(body.length - 4, 0);
+  body.copy(chunk, 4);
+  chunk.writeUInt32BE(crcBytes(body), body.length + 4);
+  return Buffer.concat([png.subarray(0, 33), chunk, png.subarray(33)]);
+};
+
+test('stripMetadata: a PNG loses its text and EXIF chunks and a JPEG its EXIF and comments; the picture is untouched', () => {
+  const png = encodePng(40, 30, Buffer.alloc(40 * 30 * 4, 120));
+  const tagged = withTextChunk(png, 'GPSLatitude\u000051.5N');
+  assert.ok(tagged.includes('GPSLatitude'));
+  const clean = stripMetadata(tagged);
+  assert.equal(clean.includes('GPSLatitude'), false);
+  assert.deepEqual(clean, png, 'back to the bytes it had without the text');
+  assert.deepEqual(decodePng(clean).rgba, decodePng(png).rgba);
+  const seg = (marker, payload) => Buffer.concat([Buffer.from([0xff, marker, (payload.length + 2) >> 8, (payload.length + 2) & 255]), payload]);
+  const jpeg = Buffer.concat([
+    Buffer.from([0xff, 0xd8]), seg(0xe0, Buffer.from('JFIF\0\x01\x01\0\0\x01\0\x01\0\0')), seg(0xe1, Buffer.from('Exif\0\0GPSLongitude 0.1W')),
+    seg(0xfe, Buffer.from('a comment')), seg(0xc0, Buffer.from([8, 0, 30, 0, 40, 1, 1, 0x11, 0])), Buffer.from([0xff, 0xda, 0, 3, 1, 9, 9, 9, 0xff, 0xd9]),
+  ]);
+  const stripped = stripMetadata(jpeg);
+  assert.equal(stripped.includes('Exif') || stripped.includes('GPSLongitude') || stripped.includes('a comment'), false);
+  assert.ok(stripped.includes('JFIF'));
+  assert.deepEqual(imageSize(stripped), { width: 40, height: 30 });
+  assert.deepEqual(stripped.subarray(stripped.indexOf(Buffer.from([0xff, 0xda]))), jpeg.subarray(jpeg.indexOf(Buffer.from([0xff, 0xda]))), 'the picture data is the same bytes');
+});
+
+test('open_image (local server): pieces in any order become the user\'s image: metadata gone, open at once, usable in an edit and in layers; bad input refused', async () => {
+  const ctx = { env: env({ TINTLOOM_MODELARK_KEY: 'm-test-123456', OPENAI_API_KEY: 'sk-test-123456' }), mode: 'stdio', store: new ImageStore(), projectDir: dir, session: { ui: true } };
+  const call = (name, args) => handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, ctx);
+  const opened = await call('open_image', {});
+  assert.equal(opened.result.structuredContent.upload, 'open');
+  assert.match(opened.result.content[0].text, /message with the new image id will arrive/);
+  assert.match(opened.result.content[0].text, /images: \[\{ path \}\]/);
+  const send = async (bytes, upload = 'u' + Math.random().toString(36).slice(2, 14).padEnd(20, 'x'), order = null) => {
+    const b64 = bytes.toString('base64');
+    const total = Math.max(1, Math.ceil(b64.length / 262144));
+    for (const index of order || Array.from({ length: total }, (_, i) => i)) await call('upload_image_part', { upload, index, data: b64.slice(index * 262144, (index + 1) * 262144) });
+    return call('finish_image_upload', { upload, total });
+  };
+  // A photo with a position in it, sent as three pieces, last first.
+  const noisy = randomBytes(600 * 600 * 4);
+  const photo = withTextChunk(encodePng(600, 600, noisy), 'GPSLatitude\u000051.5N');
+  const total = Math.ceil(photo.toString('base64').length / 262144);
+  assert.ok(total >= 3, `${total} pieces`);
+  const done = await send(photo, undefined, Array.from({ length: total }, (_, i) => total - 1 - i));
+  assert.equal(done.result.isError, undefined, JSON.stringify(done).slice(0, 300));
+  const record = done.result.structuredContent.images[0];
+  assert.deepEqual([record.mime, record.width, record.height, record.uploaded], ['image/png', 600, 600, true]);
+  assert.match(done.result.content[0].text, new RegExp(`Its id is ${record.id}`));
+  const kept = (await ctx.store.get(record.id)).bytes;
+  assert.equal(kept.includes('GPSLatitude'), false, 'the position is gone');
+  assert.deepEqual(imageSize(kept), { width: 600, height: 600 });
+  // It is the card's open image: `selection: true` splits it, and the id edits it.
+  const before = layerRequests().length;
+  const layered = await call('generate_image', { layers: true, selection: true, out: 'layers-card-up/' });
+  assert.equal(layered.result.isError, undefined, JSON.stringify(layered).slice(0, 300));
+  assert.equal(layerRequests().length, before + 1);
+  assert.match(layerRequests().at(-1).body.image, new RegExp(`^data:image/png;base64,${kept.toString('base64').slice(0, 20)}`));
+  const edited = await call('generate_image', { prompt: 'make it blue', images: [{ id: record.id }] });
+  assert.equal(edited.result.isError, undefined, JSON.stringify(edited).slice(0, 300));
+  // Refusals, each with words for the user.
+  const text = await send(Buffer.from('this is not a picture, only a line of words'));
+  assert.match(text.result.content[0].text, /not a PNG, JPEG or WebP/);
+  const large = await send(Buffer.concat([photo.subarray(0, 8), Buffer.alloc(21 * 1024 * 1024)]));
+  assert.match(large.result.content[0].text, /larger than 20 MB/);
+  await call('upload_image_part', { upload: 'gapgapgapgapgapgapgap', index: 0, data: 'AAAA' });
+  assert.match((await call('finish_image_upload', { upload: 'gapgapgapgapgapgapgap', total: 2 })).result.content[0].text, /Piece 2 of 2 did not arrive/);
+  assert.equal((await call('upload_image_part', { upload: 'short', index: 0, data: 'AAAA' })).result.isError, true);
+  assert.equal((await call('upload_image_part', { upload: 'toolongindexxxxxxxxxxxx', index: 200, data: 'AAAA' })).result.isError, true);
+  const card = await readFile(new URL('../plugins/tintloom/server/ui/image-card.html', import.meta.url), 'utf8');
+  assert.match(card, /id="drop"/);
+  assert.match(card, /id="split"/);
+});
+
+test('image links: redirects are followed by hand, hop by hop; a hop to a private address, a plain http address or a loop is refused', async (t) => {
+  const realFetch = globalThis.fetch;
+  const asked = [];
+  const png = () => new Response(PNG, { status: 200, headers: { 'content-type': 'image/png' } });
+  const jump = (to) => new Response(null, { status: 302, headers: { location: to } });
+  const routes = {
+    'https://pub-a.test/ok.png': () => jump('https://pub-b.test/final.png'),
+    'https://pub-b.test/final.png': png,
+    'https://pub-a.test/to-private.png': () => jump('https://private.test/secret.png'),
+    'https://private.test/secret.png': png,
+    'https://pub-a.test/to-http.png': () => jump('http://pub-b.test/plain.png'),
+    'https://pub-a.test/loop.png': () => jump('https://pub-a.test/loop.png'),
+    'https://pub-a.test/relative.png': () => jump('/ok.png'),
+  };
+  t.mock.method(globalThis, 'fetch', async (input, init) => {
+    const url = String(input instanceof URL ? input.href : input);
+    if (!routes[url]) return realFetch(input, init);
+    asked.push(url);
+    return routes[url]();
+  });
+  const lookupHost = async (host) => (host === 'private.test' ? ['10.0.0.8'] : ['93.184.216.34']);
+  const ctx = { env: env({ OPENAI_API_KEY: 'sk-test-123456' }), mode: 'stdio', store: new ImageStore(), projectDir: dir, lookupHost };
+  const edit = (url) => handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'generate_image', arguments: { prompt: 'make it blue', images: [{ url }] } } }, ctx).then((r) => r.result);
+  const followed = await edit('https://pub-a.test/ok.png');
+  assert.equal(followed.isError, undefined, JSON.stringify(followed).slice(0, 300));
+  assert.deepEqual(asked, ['https://pub-a.test/ok.png', 'https://pub-b.test/final.png']);
+  asked.length = 0;
+  // A relative hop is resolved against the address that sent it (here to the path that redirects on again).
+  const relative = await edit('https://pub-a.test/relative.png');
+  assert.equal(relative.isError, undefined, JSON.stringify(relative).slice(0, 300));
+  assert.deepEqual(asked, ['https://pub-a.test/relative.png', 'https://pub-a.test/ok.png', 'https://pub-b.test/final.png']);
+  asked.length = 0;
+  const toPrivate = await edit('https://pub-a.test/to-private.png');
+  assert.equal(toPrivate.isError, true);
+  assert.match(toPrivate.content[0].text, /not reachable from here: private\.test/);
+  assert.deepEqual(asked, ['https://pub-a.test/to-private.png'], 'the private address was never asked');
+  asked.length = 0;
+  const toHttp = await edit('https://pub-a.test/to-http.png');
+  assert.equal(toHttp.isError, true);
+  assert.match(toHttp.content[0].text, /plain https addresses/);
+  asked.length = 0;
+  const loop = await edit('https://pub-a.test/loop.png');
+  assert.equal(loop.isError, true);
+  assert.ok(asked.length <= 6, `${asked.length} requests`);
+});
+
+test('generate_image with add_image opens the card to add a picture: no prompt, no key, no provider call, same answer as open_image', async () => {
+  const ctx = { env: env(), mode: 'stdio', store: new ImageStore(), projectDir: dir, session: { ui: true } };
+  const call = (name, args) => handleMessage({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: args } }, ctx).then((r) => r.result);
+  const before = seen.length;
+  const added = await call('generate_image', { add_image: true });
+  assert.equal(added.isError, undefined, JSON.stringify(added));
+  assert.deepEqual(added.structuredContent, { upload: 'open', types: ['image/png', 'image/jpeg', 'image/webp'] });
+  assert.match(added.content[0].text, /message with the new image id will arrive/);
+  assert.deepEqual(added, await call('open_image', {}), 'open_image answers the same');
+  // Whatever else is in the call, nothing is made: no prompt needed, no selection looked up, no provider asked.
+  const odd = await call('generate_image', { add_image: true, selection: true, prompt: 'x'.repeat(10), layers: true, images: [{ id: 'img_nope' }] });
+  assert.deepEqual(odd.structuredContent.upload, 'open');
+  assert.equal(seen.length, before, 'no request reached any provider');
+  const tools = (await handleMessage({ jsonrpc: '2.0', id: 2, method: 'tools/list' }, ctx)).result.tools;
+  const gen = tools.find((t) => t.name === 'generate_image');
+  assert.equal(gen.inputSchema.properties.add_image.type, 'boolean');
+  assert.match(gen.description, /call this with `add_image: true`/);
+  assert.match(gen.inputSchema.properties.images.description, /use add_image first/);
+  assert.deepEqual(tools.find((t) => t.name === 'open_image')._meta.ui.visibility, ['app'], 'not offered to the model');
+  const init = await handleMessage({ jsonrpc: '2.0', id: 3, method: 'initialize', params: { protocolVersion: '2025-06-18' } }, ctx);
+  assert.match(init.result.instructions, /call generate_image with `add_image: true`/);
+  // The card shows the drop zone for this answer, and straight away when the tool's input arrives first.
+  const card = await readFile(new URL('../plugins/tintloom/server/ui/image-card.html', import.meta.url), 'utf8');
+  assert.match(card, /add_image === true/);
 });

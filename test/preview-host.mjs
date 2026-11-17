@@ -10,6 +10,9 @@
 //   ?layers=1 splits a sample picture into layers through a fake ModelArk (the layer view: drag, hide, download);
 //   ?layers=<folder> shows a saved real split instead (a folder with manifest.json and its files, as test/layers-live.mjs writes).
 //   ?noquick=1 leaves out the small copies a result carries (an app that drops image parts); ?lag=<ms>&bps=<bytes/s> slow tool answers;
+//   ?add=1 does the same through generate_image with add_image (tool input first, then the result); ?open=1 opens the card to add an image (open_image); with ?direct=1 as well the card sends the image straight to this server's /api/upload routes (with CORS, as the site answers) instead of in pieces, and &refuse=1 makes those routes refuse so the fallback shows; with ?same=1 the page can reach into the card to drop, paste or choose a file, and /photo?p=<file> serves one.
+//   ?deaf=<ms> imitates an app that only starts listening to the card after that long; ?slow=<ms> one that takes that long to answer the card's first request; ?noinput=1 one that never sends the tool's input.
+//   ?real=<file> replays a result saved from a Claude Code transcript ({ args, stored: { content, mcpMeta } }) with its image links dead; &shape=mcp|stored|content|nometa picks how much of it the card is handed; ?card=<file> shows another copy of the card.
 //   ?replay=text|lean|bare imitates a chat reloaded (see below). ?dl=1 lets the card use ui/download-file; what it sends is saved next to the manifest, or in the temp folder, as download-N.png.
 import { createServer } from 'node:http';
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
@@ -18,6 +21,7 @@ import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
 import { ImageStore, handleMessage, makePreview } from '../plugins/tintloom/server/tintloom-mcp.mjs';
 import { encodePng, shrinkPng } from '../plugins/tintloom/skills/image/scripts/lib/png.mjs';
+import { sniffMime } from '../plugins/tintloom/skills/image/scripts/lib/util.mjs';
 
 const PORT = Number(process.env.PORT || 8790);
 
@@ -90,8 +94,14 @@ function sampleLayers(width, height) {
 }
 
 let fakeCalls = 0;
+// ?direct=1: this server also plays the site's upload routes (the real ones are web/app/api/upload/<token>/part/<n> and /done): the same protocol and CORS answers, without the checks.
+const directParts = new Map();
+const CORS = { 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'content-type' };
 // ---- the real server, pointed at the fake provider below ----
+const notes = new Map(); // what the server keeps by key (layer sets and how they were arranged), so a saved split behaves as a real one
+const folderSets = new Map(); // a saved split's folder -> the ids it was given, so a reload shows the same set again
 const ctx = {
+  progress: { async get(key) { return notes.get(key) || null; }, async set(key, value) { notes.set(key, value); } },
   mode: 'stdio',
   store: new ImageStore(),
   preview: makePreview,
@@ -121,10 +131,10 @@ const PAGE = (card) => `<!doctype html>
 <body><main id="chat">
   <div class="user" id="ask"></div>
   <div class="muted">Thought for 4s</div>
-  <iframe id="card" sandbox="allow-scripts" title="Image card"></iframe>
+  <iframe id="card" title="Image card"></iframe>
   <div class="reply" id="reply" hidden>Here's your image.</div>
 </main>
-<script>
+<script type="module">
 const q = new URLSearchParams(location.search);
 const theme = q.get('theme') === 'light' ? 'light' : 'dark';
 const restricted = q.get('restricted') === '1';
@@ -132,25 +142,38 @@ document.documentElement.dataset.theme = theme;
 const layers = q.get('layers');
 const args = { prompt: 'A quiet valley at dusk, layered hills, a low warm sun, soft haze', aspect: q.get('aspect') || '3:2', count: Number(q.get('count') || 1) };
 if (q.get('error')) args.provider = 'gemini';
+if (q.get('open') || q.get('add')) { for (const k of Object.keys(args)) delete args[k]; }
+if (q.get('add')) args.add_image = true; // generate_image with add_image: the way Claude opens the card to add a picture
 if (layers) { delete args.prompt; delete args.aspect; delete args.count; args.layers = true; }
 document.getElementById('ask').textContent = 'create an image of a quiet valley at dusk';
 const frame = document.getElementById('card');
+// ?real=<file> replays a saved result instead of making one (see /real below).
+const real = q.get('real') ? await fetch('/real?p=' + encodeURIComponent(q.get('real')) + '&shape=' + (q.get('shape') || 'mcp') + '&link=' + (q.get('link') || '0')).then((r) => r.json()) : null;
+if (real) { for (const k of Object.keys(args)) delete args[k]; Object.assign(args, real.args); }
 if (q.get('w')) { frame.style.width = q.get('w') + 'px'; frame.style.maxWidth = 'none'; frame.classList.add('phone'); }
+// ?same=1 lets this page reach into the card (to drop, paste or choose a file for it, as a person would); by default the card is as sandboxed as in an app.
+frame.setAttribute('sandbox', q.get('same') === '1' ? 'allow-scripts allow-same-origin' : 'allow-scripts');
 frame.srcdoc = ${JSON.stringify(card).replace(/</g, '\\u003c')};
 const send = (msg) => frame.contentWindow.postMessage({ jsonrpc: '2.0', ...msg }, '*');
-const rpc = (method, params) => fetch('/rpc?bps=' + (q.get('bps') || 0) + '&lag=' + (q.get('lag') || 0), { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }).then((r) => r.json());
+const rpc = (method, params) => fetch('/rpc?bps=' + (q.get('bps') || 0) + '&lag=' + (q.get('lag') || 0) + '&direct=' + (q.get('direct') || 0) + '&refuse=' + (q.get('refuse') || 0), { method: 'POST', body: JSON.stringify({ jsonrpc: '2.0', id: 1, method, params }) }).then((r) => r.json());
 let mode = 'inline';
+const born = performance.now();
 window.addEventListener('message', async (event) => {
   if (event.source !== frame.contentWindow) return;
   const msg = event.data;
   if (!msg || msg.jsonrpc !== '2.0' || !msg.method) return;
+  // ?deaf=<ms>: an app that is not listening yet when the card starts: what the card says in that time is lost.
+  if (performance.now() - born < Number(q.get('deaf') || 0)) return;
+  (window.heard ||= []).push(Math.round(performance.now() - born) + ' ' + msg.method + (msg.method.endsWith('size-changed') ? ' ' + msg.params.height : ''));
   const reply = (result) => send({ id: msg.id, result });
   switch (msg.method) {
     case 'ui/initialize':
+      // ?slow=<ms>: a busy app that takes this long to answer the card's first request.
+      if (q.get('slow')) await new Promise((r) => setTimeout(r, Number(q.get('slow'))));
       return reply({ protocolVersion: '2026-01-26', hostInfo: { name: 'preview-host', version: '1' }, hostCapabilities: restricted ? { message: { text: {} } } : { openLinks: {}, serverTools: {}, message: { text: {} }, ...(q.get('dl') === '1' && { downloadFile: {} }) },
         hostContext: { theme, displayMode: 'inline', availableDisplayModes: ['inline', 'fullscreen'], containerDimensions: { width: frame.clientWidth, ...(q.get('maxh') !== '0' && { maxHeight: Number(q.get('maxh') || 900) }) } } });
     case 'ui/notifications/initialized':
-      send({ method: 'ui/notifications/tool-input', params: { arguments: q.get('replay') === 'bare' ? {} : args } });
+      if (q.get('noinput') !== '1') send({ method: 'ui/notifications/tool-input', params: { arguments: q.get('replay') === 'bare' ? {} : args } });
       await new Promise((r) => setTimeout(r, Number(q.get('wait') || 1800)));
       let res;
       if (layers && layers !== '1') res = await fetch('/layers-result?noquick=' + (q.get('noquick') || '0') + '&link=' + (q.get('link') || '0') + '&dir=' + encodeURIComponent(layers)).then((r) => r.json());
@@ -158,7 +181,8 @@ window.addEventListener('message', async (event) => {
         const made = await rpc('prepare-layers', {});
         args.images = [{ id: made.id }];
         res = await rpc('tools/call', { name: 'generate_image', arguments: args });
-      } else res = await rpc('tools/call', { name: 'generate_image', arguments: args });
+      } else if (q.get('real')) res = { result: real.result };
+      else res = await rpc('tools/call', { name: q.get('open') ? 'open_image' : 'generate_image', arguments: args });
       if (q.get('hosted') === '1' && res.result.structuredContent) {
         // What the hosted service sends to an app that blocks the image link: no previews, no thumbnails.
         delete res.result._meta;
@@ -173,6 +197,8 @@ window.addEventListener('message', async (event) => {
         const sc = res.result.structuredContent || {};
         res.result = { content: [{ type: 'text', text: String(res.result.content[0].text).split('\\n')[0] }], structuredContent: { images: (sc.images || []).map((i) => ({ id: i.id, mime: i.mime, ...(i.url && { url: i.url, src: i.src }) })) } };
       }
+      // ?site=1 adds what the hosted service adds to an add-image answer: the address of the upload page.
+      if (q.get('site') && res.result.structuredContent) res.result.structuredContent.uploadPage = 'https://tintloom.com/upload';
       window.resultAt = Math.round(performance.now());
       send({ method: 'ui/notifications/tool-result', params: res.result });
       document.getElementById('reply').hidden = false;
@@ -221,8 +247,23 @@ createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify(obj));
   };
+  const route = /^\/api\/upload\/[^/]+\/(part\/(\d+)|done)(\?|$)/.exec(req.url);
+  if (route) {
+    if (req.method === 'OPTIONS') { res.writeHead(204, CORS); return res.end(); }
+    const say = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json', ...CORS }); res.end(JSON.stringify(obj)); };
+    if (req.url.startsWith('/api/upload/refuse/')) return say(503, { error: 'Uploading is not available just now.' });
+    const bytes = Buffer.concat(chunks);
+    if (route[2] !== undefined) { directParts.set(Number(route[2]), bytes); return say(200, { ok: true, part: Number(route[2]) }); }
+    const count = Number(new URL(req.url, 'http://x').searchParams.get('parts') || 0);
+    const whole = count ? Buffer.concat(Array.from({ length: count }, (_, i) => directParts.get(i) || Buffer.alloc(0))) : bytes;
+    directParts.clear();
+    const mime = sniffMime(whole);
+    if (!mime) return say(415, { error: 'That file is not a PNG, JPEG or WebP image.' });
+    return say(200, { id: await ctx.store.put({ bytes: whole, mime }), bytes: whole.length });
+  }
   if (req.url.startsWith('/fake-openai/')) {
-    const fields = JSON.parse(body || '{}');
+    let fields = {};
+    try { fields = JSON.parse(body || '{}'); } catch { /* an edit arrives as a multipart form: its fields are not needed here */ }
     const [w, h] = /^\d+x\d+$/.test(fields.size || '') ? fields.size.split('x').map(Number) : [1024, 1024];
     const scale = 720 / Math.max(w, h);
     // Each request takes a different time and paints a different picture, so images land one by one.
@@ -241,12 +282,32 @@ createServer(async (req, res) => {
         bounding_box: { absolute: part.box, normalized: [Math.round((part.box[0] / width) * 1000), Math.round((part.box[1] / height) * 1000), Math.round((part.box[2] / width) * 1000), Math.round((part.box[3] / height) * 1000)] } })),
     ] });
   }
+  if (req.url.startsWith('/real')) {
+    // A result as a Claude Code transcript keeps it: { args, stored: { content, mcpMeta: { structuredContent, _meta } } }.
+    //   shape=mcp: as the server sent it. stored: the content as the transcript has it (image parts reshaped, the app's own
+    //   text parts between ours), with structuredContent and _meta. content: that content alone. nometa: mcp without _meta.
+    const query = new URL(req.url, 'http://x').searchParams;
+    const saved = JSON.parse(readFileSync(query.get('p'), 'utf8'));
+    const shape = query.get('shape');
+    const { structuredContent, _meta } = saved.stored.mcpMeta || {};
+    const sent = saved.stored.content.filter((c) => !(c.type === 'text' && c.text.startsWith('[Image: source'))).map((c) => (c.type === 'image' && c.source ? { type: 'image', data: c.source.data, mimeType: c.source.media_type } : c));
+    const result = shape === 'content' ? { content: saved.stored.content } : shape === 'stored' ? { content: saved.stored.content, structuredContent, _meta } : shape === 'nometa' ? { content: sent, structuredContent } : { content: sent, structuredContent, _meta };
+    // The image links are dead unless ?link=1: the app this imitates blocks them.
+    const dead = (text) => (query.get('link') === '1' ? text : text.replace(/http:\/\/127\.0\.0\.1:\d+\/files\//g, 'http://127.0.0.1:9/files/'));
+    return json(JSON.parse(dead(JSON.stringify({ args: saved.args, result }))));
+  }
+  if (req.url.startsWith('/photo')) {
+    const file = new URL(req.url, 'http://x').searchParams.get('p');
+    res.writeHead(200, { 'Content-Type': file.endsWith('.png') ? 'image/png' : 'image/jpeg' });
+    return res.end(readFileSync(file));
+  }
   if (req.url.startsWith('/rpc')) {
     const call = JSON.parse(body);
     if (call.method === 'prepare-layers') return json({ id: await ctx.store.put({ bytes: paint(SAMPLE.width, SAMPLE.height, 1), mime: 'image/png' }) });
-    const answer = await handleMessage(call, ctx);
-    // ?lag=<ms>&bps=<bytes per second> slow every tool answer down, as a long way to the app does.
     const params = new URL(req.url, 'http://x').searchParams;
+    const hostCtx = params.get('direct') === '1' ? { ...ctx, uploads: { ticket: async () => ({ uploadUrl: `http://localhost:${PORT}/api/upload/${params.get('refuse') === '1' ? 'refuse' : 'previewtoken'}`, expiresInSeconds: 600, maxBytes: 25 * 1024 * 1024 }) } } : ctx;
+    const answer = await handleMessage(call, hostCtx);
+    // ?lag=<ms>&bps=<bytes per second> slow every tool answer down, as a long way to the app does.
     const wait = Number(params.get('lag') || 0) + (Number(params.get('bps') || 0) ? (JSON.stringify(answer).length / Number(params.get('bps'))) * 1000 : 0);
     if (wait) await new Promise((r) => setTimeout(r, wait));
     return json(answer);
@@ -263,13 +324,17 @@ createServer(async (req, res) => {
     let pics = 0;
     for (const [i, image] of manifest.images.entries()) {
       const bytes = readFileSync(join(dir, image.file));
-      const id = await ctx.store.put({ bytes, mime: image.mime || 'image/png' });
+      const id = (folderSets.get(dir) || [])[i] || await ctx.store.put({ bytes, mime: image.mime || 'image/png' });
       let small = null;
       try { small = (image.mime === 'image/png' || !image.mime) && new URL(req.url, 'http://x').searchParams.get('noquick') !== '1' ? shrinkPng(bytes, 384) : null; } catch { /* not readable */ }
       const record = { ...image, id, ...(q_linked(req.url) && { src: `http://localhost:${PORT}/layerfile?dir=${encodeURIComponent(dir)}&i=${i}` }) };
       if (small) { record.pic = pics++; content.push({ type: 'image', data: small.toString('base64'), mimeType: 'image/png' }); }
       images.push(record);
     }
+    folderSets.set(dir, images.map((image) => image.id));
+    // The set is kept as the server keeps a real split, so reloading the card finds it and what was arranged.
+    const { credits: _spent, ...kept } = { ...manifest, layers: true, images: images.map(({ src, pic, ...rest }) => rest) };
+    await Promise.all(images.map((image) => ctx.progress.set(`layerset-${image.id}`, kept)));
     return json({ result: { structuredContent: { ...manifest, layers: true, images, pics }, content } });
   }
   if (req.url.startsWith('/layerfile')) {
@@ -286,7 +351,9 @@ createServer(async (req, res) => {
     writeFileSync(join(dir, `download-${++saved}.png`), Buffer.from(blob, 'base64'));
     return json({ ok: true });
   }
-  const card = (await handleMessage({ jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri: 'ui://tintloom/image-card.html' } }, ctx)).result.contents[0].text;
+  // ?card=<file> shows another copy of the card (an older version, say) in place of this checkout's.
+  const other = new URL(req.url, 'http://x').searchParams.get('card');
+  const card = other ? readFileSync(other, 'utf8') : (await handleMessage({ jsonrpc: '2.0', id: 1, method: 'resources/read', params: { uri: 'ui://tintloom/image-card.html' } }, ctx)).result.contents[0].text;
   res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
   res.end(PAGE(card));
 }).listen(PORT, '127.0.0.1', () => console.log(`Image card preview: http://localhost:${PORT}`));

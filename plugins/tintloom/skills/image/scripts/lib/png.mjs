@@ -151,6 +151,50 @@ export function decodePng(buf) {
   return { width, height, rgba };
 }
 
+/**
+ * The image with its metadata removed (EXIF and so GPS, XMP, text, comments, timestamps) and nothing else changed:
+ * the pixels are not decoded or re-encoded. PNG and JPEG are cleaned; anything else (WebP) comes back as it is.
+ * Colour profiles and the JPEG's own colour-transform marker stay, so the picture looks the same.
+ */
+export function stripMetadata(buf) {
+  if (buf.length > 33 && buf[0] === 0x89 && buf[1] === 0x50) {
+    const keep = new Set(['IHDR', 'PLTE', 'IDAT', 'IEND', 'tRNS', 'gAMA', 'cHRM', 'sRGB', 'iCCP', 'sBIT', 'pHYs']);
+    const parts = [buf.subarray(0, 8)];
+    for (let pos = 8; pos + 12 <= buf.length; ) {
+      const length = buf.readUInt32BE(pos);
+      const name = buf.toString('ascii', pos + 4, pos + 8);
+      const end = pos + 12 + length;
+      if (end > buf.length) return buf;
+      // A chunk whose first letter is capital is critical to drawing the image; the rest are kept only if listed.
+      if (keep.has(name) || (name.charCodeAt(0) & 0x20) === 0) parts.push(buf.subarray(pos, end));
+      pos = end;
+      if (name === 'IEND') break;
+    }
+    return Buffer.concat(parts);
+  }
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    const parts = [buf.subarray(0, 2)];
+    let pos = 2;
+    while (pos + 4 <= buf.length) {
+      if (buf[pos] !== 0xff) return buf;
+      const marker = buf[pos + 1];
+      if (marker === 0xff) { pos++; continue; }
+      if (marker === 0xda) { parts.push(buf.subarray(pos)); break; } // the picture's data follows: the rest is kept as it is
+      if (marker === 0xd9) { parts.push(buf.subarray(pos, pos + 2)); break; }
+      const length = buf.readUInt16BE(pos + 2);
+      const end = pos + 2 + length;
+      if (length < 2 || end > buf.length) return buf;
+      const icc = marker === 0xe2 && buf.toString('ascii', pos + 4, pos + 15) === 'ICC_PROFILE';
+      // APP1 (EXIF, XMP), APP13 (Photoshop), the other APPn and comments go; JFIF (APP0), ICC and Adobe's APP14 stay.
+      const drop = marker === 0xe1 || marker === 0xed || marker === 0xfe || (marker >= 0xe3 && marker <= 0xef && marker !== 0xee) || (marker === 0xe2 && !icc);
+      if (!drop) parts.push(buf.subarray(pos, end));
+      pos = end;
+    }
+    return Buffer.concat(parts);
+  }
+  return buf;
+}
+
 /** A smaller PNG of a PNG, its long edge at most `maxEdge`, by averaging blocks of pixels. Null if it cannot be read. */
 export function shrinkPng(buf, maxEdge) {
   const image = decodePng(buf);

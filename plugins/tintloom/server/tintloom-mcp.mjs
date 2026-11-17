@@ -100,6 +100,9 @@ function startFileServer(store, log) {
  * `sips` makes compact JPEGs; elsewhere a PNG is shrunk in-process, which is
  * larger for the same size, so only the preview is made that way.
  */
+const THUMB_LIMIT = 9_000;
+const THUMB_STEPS = [[256, 45], [256, 25], [192, 30], [128, 30], [96, 25], [64, 20]];
+
 export async function makePreview(image, record, platform = process.platform) {
   const viaSips = async (edge, quality, limit) => {
     if (platform !== 'darwin' || !record.path) return null;
@@ -133,7 +136,14 @@ export async function makePreview(image, record, platform = process.platform) {
   };
   // The preview is what the user normally sees, so it is as large as stays comfortably under apps' result limits.
   const preview = (await viaSips(1024, 68, 190_000)) || (await viaSips(768, 60, 190_000)) || viaPng(190_000);
-  return { preview, thumb: await viaSips(256, 45, 9_000) };
+  // The thumbnail is the one copy every app hands the card, so there must always be one: a busy picture that is over the
+  // limit at the first setting is tried smaller and rougher until it fits, instead of going without.
+  let thumb = null;
+  for (const [edge, quality] of THUMB_STEPS) {
+    thumb = await viaSips(edge, quality, THUMB_LIMIT);
+    if (thumb) break;
+  }
+  return { preview, thumb };
 }
 
 /** Diagnostics: create ~/.config/tintloom/debug.log to have the server append what it is asked. Never logs keys or image data. */
