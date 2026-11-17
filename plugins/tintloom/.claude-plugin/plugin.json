@@ -1,0 +1,75 @@
+{
+  "name": "tintloom",
+  "version": "0.8.10",
+  "description": "Image generation and editing for Claude with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux), BytePlus ModelArk (Seedream) or a hosted endpoint. Images appear in an inline card.",
+  "author": {
+    "name": "Tintloom"
+  },
+  "license": "MIT",
+  "keywords": [
+    "image",
+    "image generation",
+    "imagegen",
+    "openai",
+    "gemini",
+    "fal",
+    "modelark",
+    "byok"
+  ],
+  "mcpServers": {
+    "images": {
+      "command": "node",
+      "args": [
+        "${CLAUDE_PLUGIN_ROOT}/server/tintloom-mcp.mjs"
+      ],
+      "env": {
+        "TINTLOOM_HOST": "plugin",
+        "TINTLOOM_PROJECT_DIR": "${CLAUDE_PROJECT_DIR}",
+        "TINTLOOM_OPENAI_KEY": "${user_config.openai_api_key}",
+        "TINTLOOM_GEMINI_KEY": "${user_config.gemini_api_key}",
+        "TINTLOOM_FAL_KEY": "${user_config.fal_api_key}",
+        "TINTLOOM_MODELARK_KEY": "${user_config.modelark_api_key}",
+        "TINTLOOM_DEFAULT_PROVIDER": "${user_config.default_provider}"
+      }
+    }
+  },
+  "userConfig": {
+    "openai_api_key": {
+      "type": "string",
+      "title": "OpenAI API key",
+      "description": "For gpt-image models. Leave empty if you don't use OpenAI. Create one at platform.openai.com/api-keys.",
+      "sensitive": true
+    },
+    "gemini_api_key": {
+      "type": "string",
+      "title": "Google Gemini API key",
+      "description": "For Nano Banana models. Leave empty if you don't use Gemini. Create one at aistudio.google.com/apikey.",
+      "sensitive": true
+    },
+    "fal_api_key": {
+      "type": "string",
+      "title": "fal.ai API key",
+      "description": "For Seedream, Flux and other fal models. Leave empty if you don't use fal. Create one at fal.ai/dashboard/keys.",
+      "sensitive": true
+    },
+    "modelark_api_key": {
+      "type": "string",
+      "title": "BytePlus ModelArk API key",
+      "description": "For ByteDance's own Seedream models. Leave empty if you don't use ModelArk. Create one in the BytePlus ModelArk console (API key management).",
+      "sensitive": true
+    },
+    "default_provider": {
+      "type": "string",
+      "title": "Default provider",
+      "description": "Which provider makes images when you don't name one. auto uses the first one that has a key.",
+      "default": "auto",
+      "options": [
+        "auto",
+        "openai",
+        "gemini",
+        "fal",
+        "modelark"
+      ]
+    }
+  }
+}

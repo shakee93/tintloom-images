@@ -1,0 +1,14 @@
+{
+  "name": "tintloom",
+  "description": "Image generation for Claude and Codex with your own provider keys.",
+  "owner": {
+    "name": "Tintloom"
+  },
+  "plugins": [
+    {
+      "name": "tintloom",
+      "source": "./plugins/tintloom",
+      "description": "Generate and edit images with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux) or a hosted endpoint."
+    }
+  ]
+}

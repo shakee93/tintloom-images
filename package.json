@@ -1,0 +1,16 @@
+{
+  "name": "tintloom",
+  "version": "0.8.10",
+  "description": "Image generation and editing for Claude Code with your own provider keys.",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "serve": "node plugins/tintloom/server/tintloom-mcp.mjs --http",
+    "validate": "claude plugin validate . && claude plugin validate plugins/tintloom",
+    "preview": "node test/preview-host.mjs"
+  }
+}

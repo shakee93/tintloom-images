@@ -1,0 +1,35 @@
+{
+  "name": "tintloom",
+  "version": "0.8.10",
+  "description": "Generate and edit images with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux), BytePlus ModelArk (Seedream) or a hosted endpoint.",
+  "author": {
+    "name": "Tintloom"
+  },
+  "license": "MIT",
+  "keywords": [
+    "image",
+    "image generation",
+    "imagegen",
+    "openai",
+    "gemini",
+    "fal",
+    "modelark",
+    "byok"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Tintloom",
+    "shortDescription": "Generate and edit images with your own keys",
+    "longDescription": "Create and edit images with the provider you choose and the key you own: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai models such as Seedream and Flux, BytePlus ModelArk (Seedream), or a hosted endpoint.",
+    "developerName": "Tintloom",
+    "category": "Productivity",
+    "capabilities": [
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Generate a hero image for this landing page",
+      "Edit this photo: make the background a clean studio grey"
+    ]
+  }
+}

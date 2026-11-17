@@ -1,0 +1,1793 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Image</title>
+<style>
+  /* Every value falls back to a neutral default; the host's variables win. */
+  :root {
+    --bg-1: var(--color-background-primary, light-dark(#ffffff, #1f1e1d));
+    --bg-2: var(--color-background-secondary, light-dark(#f5f4ef, #262624));
+    --bg-3: var(--color-background-tertiary, light-dark(#ecebe4, #30302e));
+    --text-1: var(--color-text-primary, light-dark(#141413, #faf9f5));
+    --text-2: var(--color-text-secondary, light-dark(#5e5d59, #b0aea5));
+    --text-3: var(--color-text-tertiary, light-dark(#87867f, #87867f));
+    --danger: var(--color-text-danger, light-dark(#b53333, #ee8884));
+    --line: var(--color-border-secondary, light-dark(rgba(20, 20, 19, 0.16), rgba(250, 249, 245, 0.18)));
+    --line-strong: var(--color-border-primary, light-dark(rgba(20, 20, 19, 0.32), rgba(250, 249, 245, 0.36)));
+    --ring: var(--color-ring-primary, light-dark(#2c84db, #61aaf2));
+    --sans: var(--font-sans, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+    --r-img: var(--border-radius-lg, 12px);
+    --r-btn: var(--border-radius-md, 8px);
+    --size-sm: var(--font-text-sm-size, 14px);
+    --size-xs: var(--font-text-xs-size, 12px);
+    --paint: #2c84db;
+    /* Tintloom's lime: the waiting dots and other accents. Darker on light backgrounds so it stays visible. */
+    --accent: light-dark(#6f8a00, #d2ff1f);
+    color-scheme: light dark;
+  }
+  :root[data-theme="light"] { color-scheme: light; }
+  :root[data-theme="dark"] { color-scheme: dark; }
+
+  * { box-sizing: border-box; }
+  html, body { margin: 0; background: transparent; }
+  body { font: var(--size-sm)/1.45 var(--sans); color: var(--text-1); -webkit-font-smoothing: antialiased; }
+  #app { padding: 2px; display: flex; flex-direction: column; gap: 10px; }
+  /* A phone app gives the card the full width of the screen: keep the chat's own side margin. */
+  body.bleed:not(.full) #app { padding: 4px 16px 6px; }
+  [hidden] { display: none !important; }
+  button, input { font: inherit; color: inherit; }
+  :focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+
+  /* ---- images ---- */
+  .gallery { display: flex; gap: 8px; align-items: flex-start; }
+  /* --ratio is the shown image's width / height; --cap is the tallest the image may be in the conversation. */
+  .stage { display: grid; gap: 8px; justify-items: start; flex: 0 1 min(560px, calc(var(--cap, 520px) * var(--ratio, 1))); min-width: 0; }
+  /* Several images: one large, the rest picked from a strip beside it. */
+  .stage.many .frame:not(.current) { display: none; }
+  .thumbs { display: flex; flex-direction: column; gap: 6px; flex: none; }
+  .thumbs { padding: 2px; }
+  .thumbs button { position: relative; width: 52px; height: 52px; padding: 0; border: 0; border-radius: 10px; overflow: hidden; background: var(--bg-2); cursor: pointer; }
+  .thumbs button { opacity: 0.6; transition: opacity 0.15s ease; }
+  .thumbs button:hover, .thumbs button[aria-pressed="true"] { opacity: 1; }
+  /* The chosen one: a quiet ring, and only once its picture is there. */
+  .thumbs button[aria-pressed="true"]:not(.pending) { box-shadow: 0 0 0 1.5px var(--bg-1), 0 0 0 3px var(--text-2); }
+  .thumbs img { display: block; width: 100%; height: 100%; object-fit: cover; border-radius: inherit; }
+  .thumbs img:not([src]) { visibility: hidden; }
+  .thumbs button.pending { cursor: default; animation: pending 1.4s ease-in-out infinite; }
+  @keyframes pending { 0%, 100% { opacity: 0.45; } 50% { opacity: 1; } }
+  .frame.wait img.early { opacity: 1; border-radius: var(--r-img); background: var(--bg-2); }
+  @media (prefers-reduced-motion: reduce) { .thumbs button.pending { animation: none; } }
+  body.editing .thumbs { display: none; }
+  body.editing .gallery { justify-content: center; width: 100%; }
+  body.editing .stage { flex: 1 1 auto; }
+  @media (max-width: 420px) {
+    .gallery { flex-direction: column; }
+    /* Stacked, the basis above would be a height: size by width instead. */
+    .stage { flex: 0 0 auto; width: 100%; max-width: min(560px, calc(var(--cap, 520px) * var(--ratio, 1))); }
+    .thumbs { flex-direction: row; }
+  }
+  .frame {
+    position: relative; width: 100%; max-width: min(560px, calc(var(--cap, 520px) * var(--ratio, 1))); aspect-ratio: var(--ratio, 1);
+    background: var(--bg-2); border-radius: var(--r-img); overflow: hidden; cursor: pointer;
+  }
+  .frame img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; opacity: 0; transition: opacity 0.35s ease; user-select: none; -webkit-user-drag: none; }
+  .frame img.ready { opacity: 1; }
+  /* ---- layer view: the base and its layers at their real places; drag, hide, download ---- */
+  .layers { display: flex; gap: 12px; align-items: flex-start; width: 100%; }
+  .lstage { position: relative; flex: 1 1 0; min-width: 0; width: 100%; max-width: min(560px, calc(var(--cap, 520px) * var(--ratio, 1))); aspect-ratio: var(--ratio, 1); overflow: hidden; border-radius: var(--r-img); background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-2) 0 50%) 0 0 / 20px 20px; }
+  .lbox { position: absolute; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; }
+  .lbox.base { inset: 0; cursor: default; touch-action: auto; }
+  .lbox::after { content: ''; position: absolute; inset: -10px; }
+  .lbox.base::after { display: none; }
+  .lbox.drag { cursor: grabbing; }
+  .lbox.off { display: none; }
+  /* A picture is never shown before it has loaded: it stays invisible (and has no address yet) until it is ready. */
+  .lbox img { display: block; width: 100%; height: 100%; object-fit: fill; pointer-events: none; -webkit-user-drag: none; opacity: 0; transition: opacity 0.35s ease; }
+  .lbox img.ready { opacity: 1; }
+  .lbox.nopic { display: none; }
+  .lstage.loading .lbox { pointer-events: none; }
+  .lstage canvas.dots { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; pointer-events: none; transition: opacity 0.2s ease; }
+  .lstage.loading.dots-on canvas.dots { opacity: 1; }
+  .lbox.sel { outline: 2px solid var(--accent); outline-offset: -2px; z-index: 50; }
+  .lbox.sel.base { z-index: auto; }
+  .lside { display: flex; flex-direction: column; gap: 8px; flex: 0 0 min(250px, 38%); min-width: 0; }
+  .llist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; max-height: 360px; overflow-y: auto; }
+  .lrow { display: flex; align-items: center; min-height: 44px; border: 1px solid transparent; border-radius: var(--r-btn); background: var(--bg-2); }
+  .lrow.sel { border-color: var(--accent); }
+  .lrow .pick { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; height: 44px; padding: 0 6px; border: 0; background: none; text-align: left; cursor: pointer; }
+  .lrow .th { width: 32px; height: 32px; flex: none; border-radius: 6px; object-fit: contain; background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-1) 0 50%) 0 0 / 8px 8px; }
+  .lrow .th:not([src]) { color: transparent; }
+  .lrow.pending .th { animation: pending 1.4s ease-in-out infinite; }
+  .lrow .retry { height: 36px; margin: 0 4px; padding: 0 12px; flex: none; border: 1px solid var(--line-strong); border-radius: 999px; background: none; cursor: pointer; font-weight: 500; }
+  .lrow .why { display: block; color: var(--danger); font-size: var(--size-xs); }
+  .lrow .nmbox { flex: 1; min-width: 0; overflow: hidden; }
+  .lrow .nmbox .nm { display: block; }
+  @media (prefers-reduced-motion: reduce) { .lrow.pending .th { animation: none; } }
+  /* A button that is fetching the full pictures shows three lit dots after its words. */
+  .lbar button.busy::after { content: ''; width: 4px; height: 4px; margin-left: 4px; border-radius: 50%; background: var(--accent); box-shadow: 8px 0 0 var(--accent), 16px 0 0 var(--accent); animation: pending 1s ease-in-out infinite; margin-right: 16px; }
+  .lbar button.primary.busy::after { background: #fff; box-shadow: 8px 0 0 #fff, 16px 0 0 #fff; }
+  .lrow .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .lrow .eye { width: 44px; height: 44px; flex: none; display: grid; place-items: center; padding: 0; border: 0; background: none; color: var(--text-2); cursor: pointer; }
+  .lrow .eye:hover { color: var(--text-1); }
+  .lrow.off .th, .lrow.off .nm { opacity: 0.45; }
+  .lbar { justify-content: flex-start; }
+  .lbar button { min-height: 34px; }
+  @media (pointer: coarse) { .lbar button { min-height: 44px; } }
+  @media (max-width: 520px) {
+    .layers { flex-direction: column; }
+    .lside { flex: none; width: 100%; }
+    .llist { max-height: 240px; }
+    .lstage { flex: none; max-width: none; }
+  }
+  /* Layers: each tile says which layer it is. */
+  .layer-name { position: absolute; top: 10px; left: 10px; max-width: calc(100% - 20px); padding: 3px 10px; border-radius: 999px; background: rgba(20, 20, 19, 0.62); color: #fff; font-size: var(--size-sm); font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; pointer-events: none; }
+  body.editing .layer-name { display: none; }
+  .frame.transparent { background: repeating-conic-gradient(var(--bg-3) 0 25%, var(--bg-2) 0 50%) 0 0 / 20px 20px; }
+
+  /* Controls that sit on the image and show on hover, as in a photo viewer */
+  .on-image {
+    position: absolute; bottom: 10px; display: inline-flex; align-items: center; gap: 6px;
+    height: 32px; padding: 0 12px; border: 0; border-radius: 999px; cursor: pointer;
+    background: rgba(20, 20, 19, 0.62); color: #fff; font-weight: 500; font-size: var(--size-sm);
+    backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+    opacity: 0; transition: opacity 0.15s ease;
+  }
+  .on-image.left { left: 10px; }
+  .on-image.right { right: 10px; padding: 0; width: 32px; justify-content: center; }
+  .on-image:hover { background: rgba(20, 20, 19, 0.8); }
+  .frame:hover .on-image, .frame:focus-within .on-image { opacity: 1; }
+  @media (hover: none) { .on-image { opacity: 1; } }
+  /* Icons are from Lucide (lucide.dev, ISC licence), inlined so the card loads nothing. */
+  svg.i { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; flex: none; }
+
+  /* waiting: a field of dots with a wave travelling through it */
+  .frame.wait { cursor: default; background: transparent; border-radius: 0; overflow: visible; }
+  .frame.wait canvas.dots { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .frame.failed { cursor: default; display: grid; place-items: center; padding: 16px; text-align: center; color: var(--text-2); }
+  .status { color: var(--text-2); min-height: 1.45em; }
+
+  /* ---- editor ---- */
+  body.editing .stage { grid-template-columns: 1fr; justify-items: center; max-width: none; width: 100%; }
+  body.editing .frame { cursor: default; }
+  body.editing .frame:not(.current) { display: none; }
+  body.editing .on-image { display: none; }
+  body.editing #app { align-items: center; }
+  body.full #app { min-height: 100vh; justify-content: center; padding: calc(12px + var(--safe-top, 0px)) calc(12px + var(--safe-right, 0px)) calc(12px + var(--safe-bottom, 0px)) calc(12px + var(--safe-left, 0px)); }
+  body.tool-paint .frame.current, body.tool-comment .frame.current { cursor: crosshair; touch-action: none; }
+  /* Pinch to look closer: the image grows inside the space it had. */
+  body.editing .frame.current { touch-action: none; transform-origin: 0 0; }
+  .stage.zoomed { overflow: hidden; border-radius: var(--r-img); }
+  .stage.zoomed .frame { border-radius: 0; }
+  canvas.paint { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0.5; pointer-events: none; }
+
+  .pin {
+    position: absolute; width: 24px; height: 24px; margin: -12px 0 0 -12px; border-radius: 50%; border: 2px solid #fff;
+    background: var(--paint); color: #fff; font-size: 12px; font-weight: 600; display: grid; place-items: center; padding: 0; cursor: pointer;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, 0.4);
+  }
+  .note {
+    position: absolute; width: min(220px, 60%); height: 32px; padding: 0 10px; border-radius: var(--r-btn);
+    border: 1px solid var(--line-strong); background: var(--bg-1); color: var(--text-1); box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
+  }
+
+  .pill {
+    display: inline-flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 2px; padding: 4px;
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 12px; max-width: 100%; position: relative;
+  }
+  .pill button, .menu button {
+    display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 10px; border: 0; border-radius: var(--r-btn);
+    background: transparent; cursor: pointer; font-weight: 500; white-space: nowrap;
+  }
+  .pill button:hover, .menu button:hover { background: var(--bg-3); }
+  .pill button[disabled] { opacity: 0.45; cursor: default; background: transparent; }
+  .pill button.primary { background: var(--ring); color: #fff; }
+  .pill button.primary[disabled] { background: var(--ring); }
+  .pill .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+  .pill .tip { color: var(--text-2); padding: 0 8px; }
+  .pill input[type="range"] { width: 96px; accent-color: var(--ring); margin: 0 6px; }
+  .menu {
+    position: absolute; bottom: calc(100% + 6px); right: 0; z-index: 3; display: grid; padding: 4px; min-width: 190px;
+    background: var(--bg-1); border: 1px solid var(--line); border-radius: 12px; box-shadow: 0 6px 24px rgba(0, 0, 0, 0.28);
+  }
+  .menu button { justify-content: space-between; font-weight: 400; }
+  .menu button span { color: var(--text-3); }
+
+  .composer {
+    display: flex; align-items: center; gap: 6px; width: 100%; max-width: 560px; padding: 5px 5px 5px 14px;
+    background: var(--bg-2); border: 1px solid var(--line); border-radius: 999px;
+  }
+  .composer:focus-within { border-color: var(--line-strong); }
+  .composer input { flex: 1; min-width: 0; height: 30px; border: 0; background: transparent; outline: none; }
+  .composer input::placeholder { color: var(--text-3); }
+  .round { width: 30px; height: 30px; flex: none; border: 0; border-radius: 50%; display: grid; place-items: center; cursor: pointer; background: var(--text-1); color: var(--bg-1); }
+  .round[disabled] { opacity: 0.35; cursor: default; }
+
+  .meta { color: var(--text-3); font-size: var(--size-xs); overflow-wrap: anywhere; align-self: flex-start; }
+  body.editing .meta { display: none; }
+  .billing { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--r-img); }
+  .billing span { color: var(--text-3); font-size: var(--size-sm); }
+  .billing button { margin-top: 6px; padding: 7px 14px; border: 0; border-radius: 999px; background: var(--text-1); color: var(--bg-1); font-weight: 600; cursor: pointer; }
+  .topup { margin-left: 6px; padding: 2px 10px; border: 0; border-radius: 999px; background: var(--accent); color: light-dark(#fff, #0d0d0c); font-size: var(--size-xs); font-weight: 600; line-height: 18px; cursor: pointer; vertical-align: baseline; }
+  body.editing .topup { display: none; }
+  .error { color: var(--danger); white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; user-select: text; }
+
+  /* In the editor, several images are paged through: swipe, arrow keys, or the dots. */
+  .pager { display: inline-flex; gap: 2px; padding: 3px 6px; border-radius: 999px; background: var(--bg-2); }
+  .pager button { width: 18px; height: 18px; padding: 0; border: 0; background: none; cursor: pointer; display: grid; place-items: center; }
+  .pager button::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: var(--text-3); opacity: 0.6; }
+  .pager button[aria-pressed="true"]::before { background: var(--text-1); opacity: 1; }
+  .pill .ico, .pill .short { display: none; }
+  /* Phones: the tools are a row of round buttons along the bottom, as in a photo app;
+     download and close sit in the top corner. */
+  @media (max-width: 520px) {
+    #tools { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 0; width: 100%; padding: 0; background: none; border: 0; border-radius: 0; }
+    #tools .ico { display: grid; place-items: center; width: 46px; height: 46px; border-radius: 50%; background: var(--bg-2); border: 1px solid var(--line); color: var(--text-1); }
+    #tools .ico svg { width: 20px; height: 20px; }
+    #tools > button { flex-direction: column; gap: 6px; height: auto; padding: 4px 0; font-size: 11px; font-weight: 400; color: var(--text-2); }
+    #tools > button:hover { background: transparent; }
+    #tools > button:active .ico { background: var(--bg-3); }
+    #tools .sep, #tools .long { display: none; }
+    #tools .short { display: inline; }
+    #tools #save, #tools #close {
+      position: fixed; top: calc(10px + var(--safe-top, 0px)); z-index: 4; width: 38px; height: 38px; padding: 0; justify-content: center;
+      border-radius: 50%; background: var(--bg-2); border: 1px solid var(--line); color: var(--text-1);
+    }
+    #tools #save { right: calc(12px + var(--safe-right, 0px)); }
+    #tools #close { right: calc(58px + var(--safe-right, 0px)); }
+    /* In the full view the app has its own close button. */
+    body.full #tools #close { display: none; }
+    #sizes { right: auto; left: 50%; transform: translateX(-50%); }
+    body.full.editing #app { justify-content: flex-start; }
+    body.full.editing .gallery { margin-block: auto; }
+    #toolbar { width: 100%; padding: 6px; border-radius: 16px; gap: 4px; }
+    #toolbar .tip { flex: 0 0 100%; text-align: center; padding: 2px 8px 4px; }
+    #toolbar button { height: 36px; padding: 0 14px; border-radius: 999px; }
+    #toolbar input[type="range"] { flex: 1 1 90px; }
+    .composer { max-width: none; padding: 7px 7px 7px 16px; }
+    .composer input { height: 34px; font-size: 16px; }
+    .round { width: 34px; height: 34px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .frame img, .on-image { transition: none; }
+  }
+</style>
+</head>
+<body>
+<div id="app">
+  <div class="status" id="status" role="status" hidden></div>
+  <div class="gallery">
+    <div class="stage" id="stage"></div>
+    <div class="thumbs" id="thumbs" role="group" aria-label="Choose an image" hidden></div>
+  </div>
+  <div class="layers" id="layers" hidden>
+    <div class="lstage" id="lstage" tabindex="0" role="group" aria-label="Layers. Drag a layer to move it. With a layer selected, arrow keys move it and Delete hides it."></div>
+    <div class="lside">
+      <ul class="llist" id="llist" aria-label="Layers, top first"></ul>
+      <div class="pill lbar" id="lbar" role="toolbar" aria-label="Layer actions">
+        <button type="button" class="primary" id="ldl-image">Download image</button>
+        <button type="button" id="ldl-layer" disabled>Download layer</button>
+        <button type="button" id="ldl-all">Download all layers</button>
+        <button type="button" id="lreset">Reset</button>
+      </div>
+    </div>
+  </div>
+  <p class="error" id="error" role="alert" hidden></p>
+
+  <div class="pager" id="pager" role="group" aria-label="Choose an image" hidden></div>
+  <div class="pill" id="tools" role="toolbar" aria-label="Image editing tools" hidden>
+    <button type="button" data-tool="select"><span class="ico" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="M5 3a2 2 0 0 0-2 2"/><path d="M19 3a2 2 0 0 1 2 2"/><path d="M21 19a2 2 0 0 1-2 2"/><path d="M5 21a2 2 0 0 1-2-2"/><path d="M9 3h1"/><path d="M9 21h1"/><path d="M14 3h1"/><path d="M14 21h1"/><path d="M3 9v1"/><path d="M21 9v1"/><path d="M3 14v1"/><path d="M21 14v1"/></svg></span><span>Select</span></button>
+    <button type="button" data-tool="comment"><span class="ico" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="M22 17a2 2 0 0 1-2 2H6.828a2 2 0 0 0-1.414.586l-2.202 2.202A.71.71 0 0 1 2 21.286V5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2z"/></svg></span><span>Comment</span></button>
+    <button type="button" id="removebg"><span class="ico" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><circle cx="6" cy="6" r="3"/><path d="M8.12 8.12 12 12"/><path d="M20 4 8.12 15.88"/><circle cx="6" cy="18" r="3"/><path d="M14.8 14.8 20 20"/></svg></span><span class="long">Remove BG</span><span class="short">Cut out</span></button>
+    <button type="button" data-tool="erase"><span class="ico" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="M21 21H8a2 2 0 0 1-1.42-.587l-3.994-3.999a2 2 0 0 1 0-2.828l10-10a2 2 0 0 1 2.829 0l5.999 6a2 2 0 0 1 0 2.828L12.834 21"/><path d="m5.082 11.09 8.828 8.828"/></svg></span><span>Erase</span></button>
+    <button type="button" id="resize" aria-haspopup="menu" aria-expanded="false"><span class="ico" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="M12 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M14 15H9v-5"/><path d="M16 3h5v5"/><path d="M21 3 9 15"/></svg></span><span>Resize</span></button>
+    <button type="button" id="vary"><span class="ico" aria-hidden="true"><svg class="i" viewBox="0 0 24 24"><path d="m22 11-1.296-1.296a2.4 2.4 0 0 0-3.408 0L11 16"/><path d="M4 8a2 2 0 0 0-2 2v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2"/><circle cx="13" cy="7" r="1" fill="currentColor"/><rect x="8" y="2" width="14" height="14" rx="2"/></svg></span><span class="long">Variations</span><span class="short">Vary</span></button>
+    <span class="sep"></span>
+    <button type="button" id="save" aria-label="Download"><svg class="i" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg></button>
+    <button type="button" id="close" aria-label="Close editor"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+    <div class="menu" id="sizes" role="menu" hidden>
+      <button type="button" role="menuitem" data-ratio="1:1" data-name="Square">Square <span>1:1</span></button>
+      <button type="button" role="menuitem" data-ratio="3:4" data-name="Portrait">Portrait <span>3:4</span></button>
+      <button type="button" role="menuitem" data-ratio="9:16" data-name="Story">Story <span>9:16</span></button>
+      <button type="button" role="menuitem" data-ratio="4:3" data-name="Landscape">Landscape <span>4:3</span></button>
+      <button type="button" role="menuitem" data-ratio="16:9" data-name="Widescreen">Widescreen <span>16:9</span></button>
+    </div>
+  </div>
+
+  <div class="pill" id="toolbar" role="toolbar" aria-label="Tool options" hidden>
+    <span class="tip" id="tip"></span>
+    <input type="range" id="brush" min="2" max="14" value="6" aria-label="Brush size">
+    <button type="button" id="undo">Undo</button>
+    <button type="button" class="primary" id="send">Send</button>
+    <button type="button" id="cancel" aria-label="Cancel"><svg class="i" viewBox="0 0 24 24"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg></button>
+  </div>
+
+  <div class="composer" id="composer" hidden>
+    <input id="editbox" type="text" autocomplete="off" aria-label="Describe edits" placeholder="Describe edits">
+    <button type="button" class="round" id="apply" aria-label="Send edit"><svg class="i" viewBox="0 0 24 24"><path d="m5 12 7-7 7 7"/><path d="M12 19V5"/></svg></button>
+  </div>
+
+  <div class="meta" id="meta" hidden></div>
+</div>
+<script>
+(() => {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const gallery = document.querySelector('.gallery'), layersBox = $('layers'), lstage = $('lstage'), llist = $('llist');
+  const thumbs = $('thumbs'), stage = $('stage'), errorBox = $('error'), meta = $('meta');
+  const tools = $('tools'), toolbar = $('toolbar'), composer = $('composer'), editBox = $('editbox'), sizes = $('sizes');
+  const ICON_DOWNLOAD = '<svg class="i" viewBox="0 0 24 24"><path d="M12 15V3"/><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="m7 10 5 5 5-5"/></svg>';
+
+  // ---- JSON-RPC over postMessage: this page is the client, the host app the server ----
+  let nextId = 1;
+  const waiting = new Map();
+  const post = (msg) => window.parent.postMessage({ jsonrpc: '2.0', ...msg }, '*');
+  const notify = (method, params) => post(params ? { method, params } : { method });
+  const request = (method, params = {}, timeoutMs = 60000) =>
+    new Promise((resolve, reject) => {
+      const id = nextId++;
+      const timer = setTimeout(() => { waiting.delete(id); reject(new Error(method + ' timed out')); }, timeoutMs);
+      waiting.set(id, { resolve, reject, timer });
+      post({ id, method, params });
+    });
+
+  window.addEventListener('message', (event) => {
+    if (event.source !== window.parent) return;
+    const msg = event.data;
+    if (!msg || msg.jsonrpc !== '2.0') return;
+    if (msg.method) return onHostMessage(msg);
+    const pending = waiting.get(msg.id);
+    if (!pending) return;
+    waiting.delete(msg.id);
+    clearTimeout(pending.timer);
+    msg.error ? pending.reject(new Error(msg.error.message || 'Request failed')) : pending.resolve(msg.result);
+  });
+
+  // ---- state ----
+  const state = {
+    args: null, result: null, selected: 0, modes: [], mode: 'inline', loaded: new Map(),
+    editing: false, wentFull: false, inset: { top: 0, right: 0, bottom: 0, left: 0 }, tool: null, strokes: [], pins: [], canvas: null,
+  };
+
+  // The layer view: the base and each layer at its real place. dx and dy are how far a layer was moved, as fractions of the base.
+  const L = { on: false, items: [], sel: -1, W: 0, H: 0 };
+
+  function onHostMessage(msg) {
+    const p = msg.params || {};
+    switch (msg.method) {
+      case 'ui/notifications/tool-input':
+      case 'ui/notifications/tool-input-partial':
+        state.args = p.arguments || {};
+        if (!state.result) {
+          showWaiting();
+          if (msg.method === 'ui/notifications/tool-input') watchProgress();
+        }
+        break;
+      case 'ui/notifications/tool-result': showResult(p); break;
+      case 'ui/notifications/tool-cancelled': showError('Stopped before the image was finished.'); break;
+      case 'ui/notifications/host-context-changed': applyContext(p); break;
+      case 'ui/resource-teardown':
+      case 'ping':
+        post({ id: msg.id, result: {} });
+        break;
+      default:
+        if (msg.id !== undefined) post({ id: msg.id, error: { code: -32601, message: 'Method not found' } });
+    }
+  }
+
+  function applyContext(ctx) {
+    if (!ctx) return;
+    const root = document.documentElement;
+    if (ctx.theme === 'light' || ctx.theme === 'dark') root.dataset.theme = ctx.theme;
+    const vars = ctx.styles && ctx.styles.variables;
+    if (vars) for (const [name, value] of Object.entries(vars)) if (name.startsWith('--') && value) root.style.setProperty(name, value);
+    const fonts = ctx.styles && ctx.styles.css && ctx.styles.css.fonts;
+    if (fonts && !$('hostfonts')) {
+      const style = document.createElement('style');
+      style.id = 'hostfonts';
+      style.textContent = fonts;
+      document.head.appendChild(style);
+    }
+    if (Array.isArray(ctx.availableDisplayModes)) state.modes = ctx.availableDisplayModes;
+    // Where the app says how tall a card may be, the image stays inside that, with room for the line under it.
+    const limit = ctx.containerDimensions && Number(ctx.containerDimensions.maxHeight || ctx.containerDimensions.height);
+    if (ctx.containerDimensions) { state.fixedHeight = Number(ctx.containerDimensions.height) > 0; fitPage(); }
+    if (limit > 0) root.style.setProperty('--cap', Math.max(200, Math.min(520, limit - 72)) + 'px');
+    if (ctx.safeAreaInsets) {
+      // Space the app covers with its own controls, such as its message box over the bottom of a full view.
+      for (const side of ['top', 'right', 'bottom', 'left']) {
+        state.inset[side] = Math.max(0, Number(ctx.safeAreaInsets[side]) || 0);
+        document.documentElement.style.setProperty('--safe-' + side, state.inset[side] + 'px');
+      }
+    }
+    if (ctx.platform) state.platform = ctx.platform;
+    fitScreen(state.platform);
+    if (ctx.displayMode) setMode(ctx.displayMode);
+    else { showComposer(); fitFrame(); }
+  }
+
+  // In the conversation the app sizes the card to its content, so the card never scrolls itself:
+  // a scrollbar that flashes up while the app catches up narrows the card and shifts everything.
+  // On a phone the card may span the whole screen, edge to edge, and a tall image would fill it.
+  function fitScreen(platform) {
+    const narrow = window.innerWidth <= 520;
+    const edgeToEdge = narrow && window.screen && window.innerWidth >= window.screen.width - 4;
+    document.body.classList.toggle('bleed', Boolean(edgeToEdge));
+    if (narrow && window.screen && window.screen.height && (platform === 'mobile' || edgeToEdge)) {
+      const now = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--cap')) || 520;
+      document.documentElement.style.setProperty('--cap', Math.round(Math.max(240, Math.min(now, window.screen.height * 0.5))) + 'px');
+    }
+  }
+
+  function fitPage() {
+    document.documentElement.style.overflow = state.mode === 'fullscreen' || state.fixedHeight ? '' : 'hidden';
+  }
+
+  function setMode(mode) {
+    const was = state.mode;
+    state.mode = mode;
+    document.body.classList.toggle('full', mode === 'fullscreen');
+    fitPage();
+    // The host closed the full view itself: leave the editor with it.
+    if (was === 'fullscreen' && mode !== 'fullscreen' && state.editing && state.wentFull) closeEditor(true);
+    showComposer();
+    fitFrame();
+  }
+
+  // ---- rendering ----
+  function ratioFromArgs(args) {
+    const size = /^(\d+)x(\d+)$/i.exec((args && args.size) || '');
+    if (size) return size[1] + ' / ' + size[2];
+    const aspect = /^(\d+(?:\.\d+)?):(\d+(?:\.\d+)?)$/.exec((args && args.aspect) || '');
+    return aspect ? aspect[1] + ' / ' + aspect[2] : '1 / 1';
+  }
+  // Give a frame the shape of its image. The gallery follows the frame that is on show.
+  function shape(frame, ratio) {
+    if (typeof ratio === 'string') { const [w, h] = ratio.split('/').map(Number); ratio = w / h; }
+    if (!(ratio > 0)) ratio = 1;
+    frame.dataset.ratio = String(ratio);
+    frame.style.setProperty('--ratio', String(ratio));
+    frame.style.aspectRatio = String(ratio);
+    if (stage.children.length < 2 || frame.classList.contains('current')) stage.style.setProperty('--ratio', String(ratio));
+  }
+
+  // ---- waiting: dots on a grid, lit by a chain of points that winds across the frame ----
+  const STEPS_NEW = ['Sketching the composition', 'Painting it in', 'Adding detail', 'Finishing touches'];
+  const STEPS_EDIT = ['Studying the image', 'Reworking it', 'Blending the change', 'Finishing touches'];
+  const wait = { raf: 0, timer: 0, key: '', started: 0, poll: 0, run: '', got: new Map(), choice: 0 };
+
+  function stopWaiting() {
+    cancelAnimationFrame(wait.raf);
+    clearInterval(wait.timer);
+    clearInterval(wait.poll);
+    wait.raf = wait.timer = wait.poll = 0;
+    wait.key = '';
+    $('status').hidden = true;
+  }
+
+  function setStatus(text) {
+    const span = document.createElement('span');
+    span.textContent = text;
+    $('status').replaceChildren(span);
+    $('status').hidden = false;
+  }
+
+  /** A CSS variable as a plain colour the canvas can use (variables may hold light-dark() or other variables). */
+  const probe = document.createElement('span');
+  probe.style.display = 'none';
+  function resolved(name) {
+    if (!probe.isConnected) document.body.appendChild(probe);
+    probe.style.color = 'var(' + name + ')';
+    return getComputedStyle(probe).color || '';
+  }
+
+  function drawDots(canvas, seconds, phase) {
+    const box = canvas.getBoundingClientRect();
+    if (!box.width) return;
+    const scale = window.devicePixelRatio || 1;
+    const w = Math.round(box.width * scale), h = Math.round(box.height * scale);
+    if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; }
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    const style = getComputedStyle(document.documentElement);
+    const accent = resolved('--accent') || '#d2ff1f';
+    const base = resolved('--text-3') || '#87867f';
+    const gap = 15 * scale;
+    const cols = Math.max(2, Math.floor(w / gap)), rows = Math.max(2, Math.floor(h / gap));
+    const ox = (w - (cols - 1) * gap) / 2, oy = (h - (rows - 1) * gap) / 2;
+    // The chain: where the head is now, and where it was at each earlier moment.
+    const links = [];
+    for (let k = 0; k < 26; k++) {
+      const t = seconds * 0.9 - k * 0.11 + phase;
+      links.push([w * (0.5 + 0.4 * Math.sin(t * 0.83) * Math.cos(t * 0.31)), h * (0.5 + 0.38 * Math.sin(t * 1.17 + 1.3)), 1 - k / 26]);
+    }
+    const reach = Math.min(w, h) * 0.13;
+    for (let r = 0; r < rows; r++) {
+      for (let c = 0; c < cols; c++) {
+        const x = ox + c * gap, y = oy + r * gap;
+        let lit = 0;
+        for (const [lx, ly, strength] of links) {
+          const d2 = ((x - lx) * (x - lx) + (y - ly) * (y - ly)) / (reach * reach);
+          if (d2 < 4) lit = Math.max(lit, strength * Math.exp(-d2 * 1.6));
+        }
+        ctx.globalAlpha = lit > 0.04 ? 0.3 + 0.7 * lit : 0.3;
+        ctx.fillStyle = lit > 0.04 ? accent : base;
+        ctx.beginPath();
+        ctx.arc(x, y, (0.75 + 2.5 * lit) * scale, 0, 6.2832);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function useGallery(on) {
+    gallery.hidden = !on;
+    layersBox.hidden = on;
+    L.on = !on;
+    state.layerView = L.on;
+    if (on) L.sel = -1;
+    editBox.placeholder = on ? 'Describe edits' : 'Describe edits to this layer';
+    showComposer();
+  }
+
+  function showWaiting() {
+    useGallery(true);
+    errorBox.hidden = true;
+    const count = 1; // one large box however many images are coming
+    const total = progressTotal(state.args || {});
+    const editing = Boolean(state.args && state.args.images && state.args.images.length);
+    const ratio = ratioFromArgs(state.args);
+    const key = total + '|' + ratio + '|' + editing;
+    if (wait.key === key) return; // already showing this; streamed input must not restart it
+    stopWaiting();
+    wait.key = key;
+    wait.started = performance.now();
+    wait.run = '';
+    wait.got = new Map();
+    wait.choice = 0;
+    // A slot per image on its way, filled in as each one is ready.
+    thumbs.replaceChildren();
+    thumbs.hidden = total < 2;
+    for (let i = 0; i < total && total > 1; i++) {
+      const slot = document.createElement('button');
+      slot.type = 'button';
+      slot.className = 'pending';
+      slot.disabled = true;
+      slot.setAttribute('aria-label', 'Image ' + (i + 1) + ' of ' + total + ', on its way');
+      slot.appendChild(document.createElement('img')).alt = '';
+      slot.addEventListener('click', () => showEarly(i));
+      thumbs.appendChild(slot);
+    }
+    stage.className = 'stage' + (count > 1 ? ' many' : '');
+    stage.replaceChildren();
+    const canvases = [];
+    for (let i = 0; i < count; i++) {
+      const frame = document.createElement('div');
+      frame.className = 'frame wait';
+      stage.appendChild(frame);
+      shape(frame, ratio);
+      const canvas = document.createElement('canvas');
+      canvas.className = 'dots';
+      canvas.setAttribute('aria-hidden', 'true');
+      frame.appendChild(canvas);
+      canvases.push(canvas);
+    }
+    const steps = editing ? STEPS_EDIT : STEPS_NEW;
+    let step = 0;
+    setStatus(steps[0]);
+    wait.timer = setInterval(() => { if (step < steps.length - 1) setStatus(steps[++step]); }, 5500);
+    const still = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const tick = () => {
+      const seconds = still ? 1.2 : (performance.now() - wait.started) / 1000;
+      canvases.forEach((canvas, i) => drawDots(canvas, seconds, i * 1.7));
+      if (!still) wait.raf = requestAnimationFrame(tick);
+    };
+    wait.raf = requestAnimationFrame(tick);
+  }
+
+  // ---- images of a running call, shown as each one is ready ----
+  // Same sums as the server: how many images a call makes, and the name it files progress under.
+  function progressList(args) {
+    return Array.isArray(args.prompts) ? args.prompts.filter((p) => typeof p === 'string' && p.trim()).slice(0, 4) : [];
+  }
+  function progressTotal(args) {
+    const list = progressList(args);
+    return list.length > 1 ? list.length : Math.min(Math.max(Math.floor(Number(args.count)) || 1, 1), 4);
+  }
+  function progressKey(args) {
+    const list = progressList(args);
+    const text = (list.length > 1 ? list : [String(args.prompt || '')]).join('\u0001') + '|' + progressTotal(args);
+    let hash = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0;
+    return 'p' + hash.toString(16) + text.length.toString(16);
+  }
+
+  function watchProgress() {
+    const args = state.args || {};
+    const total = progressTotal(args);
+    if (wait.poll || total < 2 || (state.caps && !state.caps.serverTools)) return;
+    const key = progressKey(args);
+    let busy = false;
+    wait.poll = setInterval(async () => {
+      if (busy || state.result) return;
+      busy = true;
+      try {
+        const res = await request('tools/call', { name: 'get_progress', arguments: { key } }, 8000);
+        const info = res && res.structuredContent;
+        if (info && info.run && Array.isArray(info.images) && !state.result) {
+          if (info.run !== wait.run) {
+            // A different call than the one seen before (the same request, asked again): start the slots over.
+            wait.run = info.run;
+            wait.got = new Map();
+            [...thumbs.children].forEach((slot) => { slot.className = 'pending'; slot.disabled = true; slot.firstChild.removeAttribute('src'); });
+            const old = stage.querySelector('img.early');
+            if (old) old.remove();
+          }
+          info.images.forEach((image) => { if (!wait.got.has(image.index)) arrived(image); });
+        }
+      } catch (e) { /* the app does not pass tool calls on: the images simply appear together at the end */ }
+      busy = false;
+    }, 2000);
+  }
+
+  async function arrived(image) {
+    const slot = thumbs.children[image.index];
+    if (!slot) return;
+    wait.got.set(image.index, image);
+    const run = wait.run;
+    try {
+      const src = image.src ? await tryImage(slot.firstChild, image.src) : await fetchImage(image.id).then((uri) => tryImage(slot.firstChild, uri));
+      if (run !== wait.run || state.result) return;
+      image.loaded = src;
+      slot.className = '';
+      slot.disabled = false;
+      slot.setAttribute('aria-label', 'Image ' + (image.index + 1) + ', ready');
+      clearInterval(wait.timer);
+      const ready = [...wait.got.values()].filter((i) => i.loaded).length;
+      setStatus(ready + ' of ' + thumbs.children.length + ' ready');
+      if (!stage.querySelector('img.early')) showEarly(image.index);
+    } catch (e) {
+      wait.got.delete(image.index); // try again on the next round
+    }
+  }
+
+  // Put a finished image in the large box while the others are still being made.
+  function showEarly(index) {
+    const image = wait.got.get(index);
+    const frame = stage.firstElementChild;
+    if (!image || !image.loaded || !frame || state.result) return;
+    let img = frame.querySelector('img.early');
+    if (!img) {
+      img = document.createElement('img');
+      img.className = 'early';
+      img.alt = '';
+      img.draggable = false;
+      img.addEventListener('load', () => { if (img.naturalWidth) shape(frame, img.naturalWidth / img.naturalHeight); });
+      frame.appendChild(img);
+    }
+    img.src = image.loaded;
+    wait.choice = index;
+    [...thumbs.children].forEach((el, i) => el.setAttribute('aria-pressed', String(i === index)));
+  }
+
+  /** Out of credits: say so, with one button to the billing page. */
+  function showBilling(billing) {
+    stopWaiting();
+    useGallery(true);
+    closeEditor(true);
+    meta.hidden = true;
+    errorBox.hidden = true;
+    const box = document.createElement('div');
+    box.className = 'billing';
+    const title = document.createElement('strong');
+    title.textContent = billing.balance > 0 ? 'Not enough credits for this image' : 'You are out of image credits';
+    const detail = document.createElement('span');
+    detail.textContent = 'This needs ' + billing.needed + (billing.needed === 1 ? ' credit' : ' credits') + '. You have ' + billing.balance + '.';
+    const go = document.createElement('button');
+    go.type = 'button';
+    go.textContent = billing.plan === 'free' ? 'See plans' : 'Top up credits';
+    go.addEventListener('click', () => request('ui/open-link', { url: billing.url }).catch(() => {}));
+    box.append(title, detail, go);
+    stage.replaceChildren(box);
+  }
+
+  function showError(text) {
+    stopWaiting();
+    useGallery(true);
+    closeEditor(true);
+    stage.replaceChildren();
+    meta.hidden = true;
+    errorBox.textContent = text;
+    errorBox.hidden = false;
+  }
+
+  function showResult(result) {
+    // The data rides in two places: the result's structuredContent, and as JSON in its text. An app that replays a result
+    // after a reload may keep only one of them, or a trimmed copy of the first, so both are read and the fuller one is used.
+    let structured = result && result.structuredContent && Array.isArray(result.structuredContent.images) ? result.structuredContent : null;
+    let fromText = null;
+    for (const part of (result && result.content) || []) {
+      if (fromText || part.type !== 'text' || typeof part.text !== 'string') continue;
+      const marked = part.text.lastIndexOf('tintloom-card:');
+      const candidates = marked >= 0 ? [part.text.slice(marked + 14), part.text] : [part.text];
+      for (const text of candidates) {
+        try {
+          const parsed = JSON.parse(text);
+          if (parsed && Array.isArray(parsed.images)) { fromText = parsed; break; }
+        } catch (e) { /* not JSON */ }
+      }
+    }
+    const richness = (d) => (d ? (d.layers === true ? 1000 : 0) + d.images.filter((i) => i && i.box).length + (d.images.some((i) => i && i.name) ? 1 : 0) : -1);
+    let data = fromText && richness(fromText) > richness(structured) ? fromText : structured || fromText;
+    if (result && result.isError && result.structuredContent && result.structuredContent.billing) return showBilling(result.structuredContent.billing);
+    if (result && result.isError) {
+      const text = (result.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('\n');
+      return showError(text || 'The image could not be made.');
+    }
+    if (!data || !Array.isArray(data.images) || !data.images.length) {
+      // Say exactly what did arrive, so the cause can be read off a screenshot.
+      const got = result ? Object.keys(result).map((k) => k + (k === 'content' && Array.isArray(result.content) ? '[' + result.content.map((c) => c.type + ':' + String(c.text || '').length).join(',') + ']' : '')).join(', ') : 'nothing';
+      const sample = (((result && result.content) || []).find((c) => c.type === 'text') || {}).text || '';
+      return showError('No image came back.\n(received: ' + got + ')\n' + sample.slice(0, 220));
+    }
+    // A split into layers reloaded with less than it had (no layer data in what the app replays): ask the server for the set
+    // by id. The tool's own input, or the words of the result, say it was a split; an ordinary gallery is not asked about.
+    const wasSplit = data.layers !== true && ((state.args && state.args.layers === true) || (result.content || []).some((c) => c && c.type === 'text' && /^Split the image into \d+ layers/.test(c.text || '')));
+    if (wasSplit && !(state.caps && !state.caps.serverTools)) {
+      stage.replaceChildren();
+      setStatus('Opening the layers');
+      request('tools/call', { name: 'get_layer_set', arguments: { id: data.images[0].id } }, 15000)
+        .then((res) => (res && res.structuredContent && res.structuredContent.set) || null, () => null)
+        .then((set) => showResultData(set && Array.isArray(set.images) ? set : data, result));
+      return;
+    }
+    return showResultData(data, result);
+  }
+
+  function showResultData(data, result) {
+    stopWaiting();
+    // A layer set that cannot be drawn as layers (no places for them) never shows the bare base, which is only the
+    // background, as its main picture: the picture that was split comes first, then the layers.
+    if (data.layers === true && !layersUsable(data)) {
+      const [base, ...layers] = data.images;
+      const original = data.original && data.original.id ? { id: data.original.id, mime: data.original.mime || 'image/png', name: 'Original' } : null;
+      data = { ...data, images: original ? [original, ...layers] : layers.length ? layers : [base] };
+    }
+    state.result = data;
+    state.selected = 0;
+    errorBox.hidden = true;
+    if (data.layers === true && layersUsable(data)) return showLayers(data, result);
+    useGallery(true);
+
+    const many = data.images.length > 1;
+    stage.className = 'stage' + (many ? ' many' : '');
+    stage.replaceChildren();
+    thumbs.replaceChildren();
+    thumbs.hidden = !many;
+    data.images.forEach((image, index) => {
+      const frame = document.createElement('div');
+      frame.className = 'frame' + ((state.args && state.args.background === 'transparent') || image.transparent ? ' transparent' : '');
+      frame.tabIndex = 0;
+      frame.setAttribute('role', 'button');
+      frame.setAttribute('aria-label', (many ? (image.name || 'Image ' + (index + 1)) + ', ' + (index + 1) + ' of ' + data.images.length : 'Generated image') + '. Open editor');
+      const img = document.createElement('img');
+      img.alt = image.prompt || data.prompt || 'Generated image';
+      img.decoding = 'async';
+      img.draggable = false;
+      const edit = document.createElement('button');
+      edit.type = 'button';
+      edit.className = 'on-image left';
+      edit.textContent = 'Edit';
+      const save = document.createElement('button');
+      save.type = 'button';
+      save.className = 'on-image right';
+      save.setAttribute('aria-label', 'Download');
+      save.innerHTML = ICON_DOWNLOAD;
+      save.addEventListener('click', (event) => { event.stopPropagation(); download(image); });
+      frame.append(img, edit, save);
+      if (image.name) {
+        const tag = document.createElement('span');
+        tag.className = 'layer-name';
+        tag.textContent = image.name;
+        frame.appendChild(tag);
+      }
+      const open = () => { if (!state.editing) openEditor(index); };
+      frame.addEventListener('click', open);
+      frame.addEventListener('keydown', (event) => { if (event.target === frame && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); open(); } });
+      stage.appendChild(frame);
+      shape(frame, ratioFromArgs(state.args));
+      if (many) {
+        const pick = document.createElement('button');
+        pick.type = 'button';
+        pick.setAttribute('aria-label', (image.name || 'Image ' + (index + 1)) + ', ' + (index + 1) + ' of ' + data.images.length);
+        pick.title = image.name || image.prompt || '';
+        pick.className = 'pending';
+        const small = document.createElement('img');
+        small.alt = '';
+        small.draggable = false;
+        img.addEventListener('load', () => { small.src = img.src; pick.className = ''; });
+        pick.appendChild(small);
+        pick.addEventListener('click', () => choose(index));
+        thumbs.appendChild(pick);
+      }
+      loadInto(image, img, frame, quickCopy(result, image, index));
+    });
+    choose(Math.min(wait.choice || 0, data.images.length - 1));
+
+    const facts = [data.providerLabel || data.provider, data.model];
+    if (data.seconds) facts.push(data.seconds + 's');
+    // The balance is only mentioned once it is running low.
+    if (data.credits && data.credits.left <= 10) facts.push(data.credits.left + (data.credits.left === 1 ? ' credit left' : ' credits left'));
+    const first = data.images[0];
+    if (first.path) facts.push('Saved to ' + (first.shown || first.path) + (many ? ' and ' + (data.images.length - 1) + ' more' : ''));
+    meta.textContent = facts.filter(Boolean).join(' · ');
+    // Running low: one small button straight to the top-up page.
+    if (data.credits && data.credits.left <= 10 && data.credits.url) {
+      const topup = document.createElement('button');
+      topup.type = 'button';
+      topup.className = 'topup';
+      topup.textContent = 'Top up';
+      topup.addEventListener('click', () => request('ui/open-link', { url: data.credits.url }).catch(() => {}));
+      meta.append(' ', topup);
+    }
+    meta.title = first.path || '';
+    meta.hidden = false;
+  }
+
+  // Which of several images is shown large (and edited).
+  function choose(index) {
+    state.selected = index;
+    [...stage.children].forEach((el, i) => el.classList.toggle('current', i === index));
+    [...thumbs.children].forEach((el, i) => el.setAttribute('aria-pressed', String(i === index)));
+    const shown = stage.children[index];
+    if (shown && shown.dataset.ratio) stage.style.setProperty('--ratio', shown.dataset.ratio);
+    refreshPager();
+  }
+
+  function refreshPager() {
+    const pager = $('pager');
+    const count = state.result ? state.result.images.length : 0;
+    pager.hidden = !(state.editing && !state.tool && count > 1);
+    if (pager.hidden) return;
+    if (pager.children.length !== count) {
+      pager.replaceChildren(...Array.from({ length: count }, (_, i) => {
+        const dot = document.createElement('button');
+        dot.type = 'button';
+        dot.setAttribute('aria-label', 'Image ' + (i + 1) + ' of ' + count);
+        dot.addEventListener('click', () => page(i - state.selected));
+        return dot;
+      }));
+    }
+    [...pager.children].forEach((el, i) => el.setAttribute('aria-pressed', String(i === state.selected)));
+  }
+
+  // Move to the next or previous image while the editor is open.
+  function page(step) {
+    const count = state.result ? state.result.images.length : 0;
+    const to = state.selected + step;
+    if (!state.editing || state.tool || !step || to < 0 || to >= count) return;
+    setZoom(1, 0, 0);
+    choose(to);
+    fitFrame();
+  }
+
+  // Large images come in pieces: apps cap the size of a single message.
+  async function fetchImage(id, edge) {
+    let data = '', mime = 'image/png';
+    for (let offset = 0, guard = 0; guard < 80; guard++) {
+      const res = await request('tools/call', { name: 'get_generated_image', arguments: { id, offset, ...(edge && { edge }) } }, 30000);
+      if (!res) throw new Error('empty reply');
+      if (res.isError) throw new Error(((res.content || []).find((c) => c.type === 'text') || {}).text || 'tool error');
+      const info = res.structuredContent;
+      if (!info || typeof info.chunk !== 'string') {
+        // An older server: the whole image in one image part.
+        const part = (res.content || []).find((c) => c.type === 'image');
+        if (!part) throw new Error('reply had no image: ' + Object.keys(res).join(','));
+        return 'data:' + part.mimeType + ';base64,' + part.data;
+      }
+      data += info.chunk;
+      mime = info.mime || mime;
+      offset += info.chunk.length;
+      if (offset >= info.total || !info.chunk.length) break;
+    }
+    return 'data:' + mime + ';base64,' + data;
+  }
+
+  const tryImage = (img, src, limit = 45000) => new Promise((resolve, reject) => {
+    const probe = new Image();
+    const timer = setTimeout(() => { probe.onload = probe.onerror = null; probe.src = ''; reject(new Error('timed out')); }, limit);
+    probe.onload = () => { clearTimeout(timer); img.src = src; resolve(src); };
+    probe.onerror = () => { clearTimeout(timer); reject(new Error('could not load')); };
+    probe.src = src;
+  });
+
+  // A copy of the picture that came with the result itself, so it needs nothing from the app:
+  // the image the model was given, else a preview or thumbnail the server made.
+  function quickCopy(result, image, index) {
+    const content = Array.isArray(result.content) ? result.content : [];
+    const pictures = content.filter((c) => c && c.type === 'image' && c.data);
+    // `pic` says which of the result's image parts is this image's copy. It is trusted only when
+    // the app passed on exactly the image parts the server sent.
+    const block = Number.isInteger(image.pic)
+      ? (pictures.length === state.result.pics ? pictures[image.pic] : null)
+      : pictures.length === state.result.images.length ? pictures[index] : null;
+    if (block && block.type === 'image' && block.data) return { name: 'copy', src: 'data:' + (block.mimeType || 'image/png') + ';base64,' + block.data };
+    const previews = result._meta && result._meta['tintloom/previews'];
+    if (previews && previews[image.id]) return { name: 'preview', src: previews[image.id] };
+    return image.thumb ? { name: 'thumb', src: image.thumb } : null;
+  }
+
+  // The copy that came with the result goes up at once; the full image replaces it when a route to it works.
+  // Apps differ in which routes they allow, and a phone on a slow line may wait a while for the full one.
+  async function loadInto(image, img, frame, quick) {
+    const show = () => {
+      if (!img.naturalWidth) return;
+      shape(frame, img.naturalWidth / img.naturalHeight);
+      img.classList.add('ready');
+      fitFrame();
+    };
+    img.addEventListener('load', show);
+    const reasons = [];
+    let shown = false;
+    if (quick) {
+      try {
+        state.loaded.set(image.id, await tryImage(img, quick.src, 10000));
+        state.route = quick.name;
+        shown = true;
+      } catch (e) {
+        reasons.push(quick.name + ': ' + (e && e.message ? e.message : 'failed'));
+      }
+    }
+    const routes = [
+      ['link', () => (image.src ? tryImage(img, image.src, shown ? 90000 : 30000) : Promise.reject(new Error('none')))],
+      ['fetch', () => (state.caps && !state.caps.serverTools ? Promise.reject(new Error('app does not offer tool calls')) : fetchImage(image.id).then((uri) => tryImage(img, uri)))],
+    ];
+    for (const [name, route] of routes) {
+      try {
+        state.loaded.set(image.id, await route());
+        state.route = name;
+        return;
+      } catch (e) {
+        reasons.push(name + ': ' + (e && e.message ? e.message : 'failed'));
+      }
+    }
+    if (shown) {
+      // A reduced copy is on screen: say so, and where the real one is.
+      const note = ' · preview shown' + (image.path ? ', full quality in the file' : '');
+      if (!meta.textContent.includes(note)) meta.textContent += note;
+      meta.title = reasons.join('; ');
+      return;
+    }
+    frame.classList.add('failed');
+    frame.style.aspectRatio = 'auto';
+    frame.replaceChildren(document.createTextNode(image.path ? 'The image is saved at ' + (image.shown || image.path) + ', but this app could not show it here.' : 'The image was made, but this app could not show it here.'));
+    const why = document.createElement('div');
+    why.style.cssText = 'font-size:12px;opacity:.7;margin-top:6px';
+    why.textContent = '(' + reasons.join('; ') + ')';
+    frame.appendChild(why);
+  }
+
+  // ---- messages back to the conversation ----
+  const current = () => state.result.images[state.selected];
+  const currentFrame = () => stage.children[state.selected];
+  const refer = () => 'this image (id ' + current().id + ')';
+  // Post a request into the conversation. Apps differ on the message shape, so try both,
+  // and if neither is accepted hand the user the words (copied, where the app allows).
+  // `short` is what the user would have typed. It is enough when the server has been told which
+  // image is open and what was painted on it; otherwise `long` spells that out in the message.
+  async function say(short, long, selection) {
+    const image = current().id;
+    closeEditor();
+    let text = long || short;
+    if (!(state.caps && !state.caps.serverTools)) {
+      try {
+        const res = await request('tools/call', { name: 'save_selection', arguments: { image, ...(selection || {}) } }, 8000);
+        if (res && !res.isError && res.structuredContent && res.structuredContent.saved) text = short;
+      } catch (e) { /* the app does not pass tool calls on: the long form carries the details */ }
+    }
+    const reasons0 = [];
+    // The protocol's shape is a list of content blocks; the single-object form is only for older apps.
+    const shapes = [[{ type: 'text', text }], { type: 'text', text }];
+    if (state.caps && !state.caps.message) reasons0.push('app does not offer messages');
+    const reasons = reasons0;
+    for (const content of shapes) {
+      try {
+        const res = await request('ui/message', { role: 'user', content }, 20000);
+        if (!res || !res.isError) return;
+        reasons.push('refused');
+      } catch (e) {
+        reasons.push(e && e.message ? e.message : 'failed');
+      }
+    }
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch (e) { /* the app does not allow the clipboard either */ }
+    errorBox.textContent = (copied ? 'This app does not let the card send requests. It is copied: paste it into the chat.' : 'This app does not let the card send requests. Paste this into the chat:') +
+      '\n' + text + '\n(' + reasons.join('; ') + '; host: ' + (state.hostCaps || 'unknown') + ')';
+    errorBox.hidden = false;
+  }
+
+  async function download(image) {
+    const name = (image.path || (image.name ? image.name.replace(/[^a-z0-9]+/gi, '-').toLowerCase() : 'image')).split('/').pop().replace(/\.[a-z0-9]+$/i, '') + '.' + ((image.mime || 'image/png').split('/')[1] || 'png').replace('jpeg', 'jpg');
+    const link0 = image.url || image.src;
+    if (state.caps && state.caps.downloadFile) {
+      const target = image.url || (image.path ? 'file://' + encodeURI(image.path) : link0);
+      if (target) {
+        return request('ui/download-file', { contents: [{ type: 'resource_link', uri: target, name, mimeType: image.mime || 'image/png' }] })
+          .then((res) => { if (res && res.isError) throw new Error('refused'); })
+          .catch(() => (link0 ? request('ui/open-link', { url: link0 }).catch(() => {}) : undefined));
+      }
+    }
+    if (link0) return request('ui/open-link', { url: link0 }).catch(() => {});
+    const uri = L.on ? await fetchImage(image.id).catch(() => null) : state.loaded.get(image.id);
+    if (!uri) return;
+    const link = document.createElement('a');
+    link.href = uri;
+    link.download = 'image.' + ((image.mime || 'image/png').split('/')[1] || 'png').replace('jpeg', 'jpg');
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  }
+
+  // ---- editor ----
+  async function openEditor(index) {
+    state.selected = index;
+    state.editing = true;
+    [...stage.children].forEach((el, i) => el.classList.toggle('current', i === index));
+    document.body.classList.add('editing');
+    setTool(null);
+    state.wentFull = false;
+    if (state.modes.includes('fullscreen') && state.mode !== 'fullscreen') {
+      try {
+        const res = await request('ui/request-display-mode', { mode: 'fullscreen' });
+        state.wentFull = (res && res.mode) === 'fullscreen';
+        if (state.wentFull) setMode('fullscreen');
+      } catch (e) { /* the host declined; edit in place */ }
+    }
+    refreshPager();
+    fitFrame();
+  }
+
+  function closeEditor(keepMode) {
+    if (!state.editing) return;
+    setTool(null);
+    state.editing = false;
+    setZoom(1, 0, 0);
+    refreshPager();
+    document.body.classList.remove('editing');
+    tools.hidden = true;
+    toolbar.hidden = true;
+    composer.hidden = true;
+    editBox.value = '';
+    [...stage.children].forEach((el, i) => { el.classList.toggle('current', i === state.selected); el.style.maxWidth = ''; });
+    if (state.wentFull && !keepMode) {
+      state.wentFull = false;
+      request('ui/request-display-mode', { mode: 'inline' }).then((res) => setMode((res && res.mode) || 'inline')).catch(() => setMode('inline'));
+    }
+    state.wentFull = false;
+  }
+
+  // In the full view the image grows to fill the height left over by the controls.
+  function fitFrame() {
+    if (!state.editing) return;
+    const frame = currentFrame();
+    const ratio = Number(frame && frame.dataset.ratio) || 1;
+    frame.style.maxWidth = state.mode === 'fullscreen' ? 'min(100%, calc((100vh - ' + (170 + state.inset.top + state.inset.bottom) + 'px) * ' + ratio + '))' : '';
+    requestAnimationFrame(() => { setZoom(zoom.z, zoom.x, zoom.y); redraw(); });
+  }
+  window.addEventListener('resize', () => { fitScreen(state.platform); fitFrame(); });
+
+  const TIPS = {
+    select: 'Paint over the part to change, then describe the edit',
+    erase: 'Paint over what to remove',
+    comment: 'Click on the image to add comments',
+  };
+
+  // The card's own message box. In a full view where the app keeps its message box on top
+  // (it reports the covered space), that box does the describing, and ours shows only for
+  // a painted selection, which the app's box cannot carry.
+  function showComposer() {
+    if (L.on) { composer.hidden = L.sel < 0; return; }
+    const appBox = state.mode === 'fullscreen' && state.inset.bottom >= 40;
+    composer.hidden = !state.editing || state.tool === 'erase' || state.tool === 'comment' || (appBox && state.tool !== 'select');
+  }
+
+  function setTool(tool) {
+    const frame = state.result ? currentFrame() : null;
+    if (frame) frame.querySelectorAll('canvas.paint, .pin, .note').forEach((el) => el.remove());
+    state.tool = tool;
+    state.strokes = [];
+    state.pins = [];
+    state.canvas = null;
+    document.body.classList.toggle('tool-paint', tool === 'select' || tool === 'erase');
+    document.body.classList.toggle('tool-comment', tool === 'comment');
+    sizes.hidden = true;
+    if (!state.editing) return;
+    tools.hidden = Boolean(tool);
+    toolbar.hidden = !tool;
+    refreshPager();
+    showComposer();
+    editBox.placeholder = tool === 'select' ? 'Describe the change for the selected area' : 'Describe edits';
+    if (!tool) return;
+    $('tip').textContent = TIPS[tool];
+    $('brush').hidden = tool === 'comment';
+    $('send').hidden = tool === 'select';
+    if (tool !== 'comment') {
+      state.canvas = document.createElement('canvas');
+      state.canvas.className = 'paint';
+      frame.appendChild(state.canvas);
+      redraw();
+    }
+    refreshToolbar();
+  }
+
+  function refreshToolbar() {
+    const empty = state.tool === 'comment' ? !state.pins.some((p) => p.text.trim()) : !state.strokes.length;
+    $('send').disabled = empty;
+    $('undo').disabled = state.tool === 'comment' ? !state.pins.length : !state.strokes.length;
+  }
+
+  // Strokes are kept in image fractions, so they redraw at any size and export at full resolution.
+  function drawStrokes(ctx, width, height) {
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--paint').trim() || '#2c84db';
+    for (const stroke of state.strokes) {
+      ctx.lineWidth = stroke.size * width;
+      ctx.beginPath();
+      stroke.points.forEach(([x, y], i) => (i ? ctx.lineTo(x * width, y * height) : ctx.moveTo(x * width, y * height)));
+      if (stroke.points.length === 1) ctx.lineTo(stroke.points[0][0] * width + 0.01, stroke.points[0][1] * height);
+      ctx.stroke();
+    }
+  }
+
+  function redraw() {
+    const canvas = state.canvas;
+    if (!canvas) return;
+    const box = canvas.getBoundingClientRect();
+    const scale = Math.min((window.devicePixelRatio || 1) * zoom.z, 4) / zoom.z;
+    canvas.width = Math.max(1, Math.round(box.width * scale));
+    canvas.height = Math.max(1, Math.round(box.height * scale));
+    drawStrokes(canvas.getContext('2d'), canvas.width, canvas.height);
+  }
+
+  const pointIn = (frame, event) => {
+    const box = frame.getBoundingClientRect();
+    return [Math.min(1, Math.max(0, (event.clientX - box.left) / box.width)), Math.min(1, Math.max(0, (event.clientY - box.top) / box.height))];
+  };
+
+  let drawing = null;
+  stage.addEventListener('pointerdown', (event) => {
+    if (!state.editing || !state.tool || event.button > 0) return;
+    const frame = currentFrame();
+    if (!frame.contains(event.target)) return;
+    if (state.tool === 'comment') {
+      if (event.target.closest('.pin, .note') || touches.size > 1) return;
+      event.preventDefault();
+      return addPin(frame, pointIn(frame, event));
+    }
+    event.preventDefault();
+    if (touches.size > 1) return; // a second finger is a pinch
+    drawing = { size: Number($('brush').value) / 100 / zoom.z, points: [pointIn(frame, event)] };
+    state.strokes.push(drawing);
+    try { frame.setPointerCapture(event.pointerId); } catch (e) { /* not capturable: moves inside the frame still draw */ }
+    redraw();
+  });
+  stage.addEventListener('pointermove', (event) => {
+    if (!drawing) return;
+    drawing.points.push(pointIn(currentFrame(), event));
+    redraw();
+  });
+  const endStroke = () => { if (drawing) { drawing = null; refreshToolbar(); } };
+  stage.addEventListener('pointerup', endStroke);
+  stage.addEventListener('pointercancel', endStroke);
+
+  // ---- zoom: pinch with two fingers, drag to move, double-tap to jump in and out ----
+  const zoom = { z: 1, x: 0, y: 0 };
+  const touches = new Map();
+  let pinch = null, pan = null, lastTap = null, swipe = null;
+  function setZoom(z, x, y) {
+    const frame = state.result ? currentFrame() : null;
+    if (!frame) return;
+    zoom.z = Math.min(5, Math.max(1, z));
+    const on = state.editing && zoom.z > 1.02;
+    if (!on) zoom.z = 1;
+    zoom.x = on ? Math.min(0, Math.max(frame.offsetWidth * (1 - zoom.z), x)) : 0;
+    zoom.y = on ? Math.min(0, Math.max(frame.offsetHeight * (1 - zoom.z), y)) : 0;
+    [...stage.children].forEach((el) => { el.style.transform = ''; });
+    if (on) frame.style.transform = 'translate(' + zoom.x + 'px, ' + zoom.y + 'px) scale(' + zoom.z + ')';
+    stage.classList.toggle('zoomed', on);
+  }
+  // A point on the screen, measured from the image's corner as it sits unzoomed.
+  const fromCorner = (frame, x, y) => {
+    const box = frame.getBoundingClientRect();
+    return [x - (box.left - zoom.x), y - (box.top - zoom.y)];
+  };
+  const zoomAt = (frame, x, y, z) => {
+    const at = fromCorner(frame, x, y);
+    const to = Math.min(5, Math.max(1, z));
+    setZoom(to, at[0] - ((at[0] - zoom.x) / zoom.z) * to, at[1] - ((at[1] - zoom.y) / zoom.z) * to);
+  };
+  stage.addEventListener('pointerdown', (event) => {
+    const frame = state.editing ? currentFrame() : null;
+    if (!frame || !frame.contains(event.target) || event.target.closest('.note')) return;
+    touches.set(event.pointerId, [event.clientX, event.clientY]);
+    if (touches.size === 2) {
+      // The first finger may have started a brush stroke: take it back.
+      if (drawing) { state.strokes.pop(); drawing = null; refreshToolbar(); }
+      const [a, b] = [...touches.values()];
+      const mid = fromCorner(frame, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+      pinch = { gap: Math.hypot(a[0] - b[0], a[1] - b[1]) || 1, z: zoom.z, on: [(mid[0] - zoom.x) / zoom.z, (mid[1] - zoom.y) / zoom.z] };
+      pan = null;
+    } else if (touches.size === 1 && !state.tool && zoom.z > 1) {
+      pan = { from: [event.clientX, event.clientY], x: zoom.x, y: zoom.y };
+    } else if (touches.size === 1 && !state.tool) {
+      swipe = [event.clientX, event.clientY];
+    }
+    if (touches.size > 1) swipe = null;
+  }, true);
+  stage.addEventListener('pointermove', (event) => {
+    if (!touches.has(event.pointerId)) return;
+    touches.set(event.pointerId, [event.clientX, event.clientY]);
+    const frame = currentFrame();
+    if (pinch && touches.size >= 2) {
+      const [a, b] = [...touches.values()];
+      const z = Math.min(5, Math.max(1, (pinch.z * Math.hypot(a[0] - b[0], a[1] - b[1])) / pinch.gap));
+      const mid = fromCorner(frame, (a[0] + b[0]) / 2, (a[1] + b[1]) / 2);
+      setZoom(z, mid[0] - pinch.on[0] * z, mid[1] - pinch.on[1] * z);
+    } else if (pan) {
+      setZoom(zoom.z, pan.x + event.clientX - pan.from[0], pan.y + event.clientY - pan.from[1]);
+    }
+  }, true);
+  const liftFinger = (event) => {
+    if (!touches.delete(event.pointerId)) return;
+    if (pinch && touches.size < 2) { pinch = null; redraw(); }
+    const moved = pan && Math.hypot(event.clientX - pan.from[0], event.clientY - pan.from[1]) > 8;
+    pan = null;
+    // A sideways flick on an unzoomed image goes to the next or previous one.
+    const across = swipe ? event.clientX - swipe[0] : 0, down = swipe ? event.clientY - swipe[1] : 0;
+    swipe = null;
+    if (event.type === 'pointerup' && Math.abs(across) > 40 && Math.abs(across) > Math.abs(down) * 1.5) return page(across < 0 ? 1 : -1);
+    if (event.type !== 'pointerup' || state.tool || touches.size || moved) return;
+    // Two quick taps in one place: zoom in there, or back out.
+    const now = Date.now();
+    if (lastTap && now - lastTap.at < 320 && Math.hypot(event.clientX - lastTap.x, event.clientY - lastTap.y) < 30) {
+      lastTap = null;
+      zoom.z > 1 ? setZoom(1, 0, 0) : zoomAt(currentFrame(), event.clientX, event.clientY, 2.5);
+    } else lastTap = { at: now, x: event.clientX, y: event.clientY };
+  };
+  stage.addEventListener('pointerup', liftFinger, true);
+  stage.addEventListener('pointercancel', liftFinger, true);
+  // A trackpad pinch arrives as a wheel event with ctrl held.
+  stage.addEventListener('wheel', (event) => {
+    const frame = state.editing ? currentFrame() : null;
+    if (!frame || !event.ctrlKey || !frame.contains(event.target)) return;
+    event.preventDefault();
+    zoomAt(frame, event.clientX, event.clientY, zoom.z * Math.exp(-event.deltaY * 0.01));
+    redraw();
+  }, { passive: false });
+
+  function addPin(frame, [x, y]) {
+    const pin = { x, y, text: '' };
+    state.pins.push(pin);
+    const dot = document.createElement('button');
+    dot.type = 'button';
+    dot.className = 'pin';
+    dot.textContent = String(state.pins.length);
+    dot.style.left = x * 100 + '%';
+    dot.style.top = y * 100 + '%';
+    const note = document.createElement('input');
+    note.type = 'text';
+    note.className = 'note';
+    note.placeholder = 'Add a comment…';
+    note.setAttribute('aria-label', 'Comment ' + state.pins.length);
+    note.style.top = 'calc(' + y * 100 + '% - 16px)';
+    if (x > 0.55) note.style.right = 'calc(' + (1 - x) * 100 + '% + 18px)'; else note.style.left = 'calc(' + x * 100 + '% + 18px)';
+    note.addEventListener('input', () => { pin.text = note.value; dot.title = note.value; refreshToolbar(); });
+    note.addEventListener('keydown', (event) => { if (event.key === 'Enter') note.hidden = true; });
+    dot.addEventListener('click', () => { note.hidden = !note.hidden; if (!note.hidden) note.focus(); });
+    pin.dot = dot;
+    pin.note = note;
+    frame.querySelectorAll('.note').forEach((el) => { el.hidden = true; });
+    frame.append(dot, note);
+    setTimeout(() => note.focus(), 0);
+    refreshToolbar();
+  }
+
+  // A mask the size of the image on show: opaque, transparent where the user painted. Base64 PNG.
+  // For a change (not an erase) each stroke also opens the box around it: people brush across a thing
+  // rather than colour it in, and the edit has to reach all of it.
+  function maskData(boxes) {
+    const img = currentFrame().querySelector('img');
+    const canvas = document.createElement('canvas');
+    canvas.width = img.naturalWidth;
+    canvas.height = img.naturalHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.globalCompositeOperation = 'destination-out';
+    drawStrokes(ctx, canvas.width, canvas.height);
+    if (boxes) for (const b of strokeRegions()) ctx.fillRect(b.x * canvas.width, b.y * canvas.height, b.width * canvas.width, b.height * canvas.height);
+    return canvas.toDataURL('image/png').split(',')[1];
+  }
+
+  const percent = (v) => Math.round(v * 100) + '%';
+
+  // The painted area as rectangles (fractions of the image), one per stroke.
+  function strokeRegions() {
+    const img = currentFrame().querySelector('img');
+    const tall = (img.naturalWidth || 1) / (img.naturalHeight || 1);
+    const round = (v) => Math.round(Math.min(1, Math.max(0, v)) * 1000) / 1000;
+    return state.strokes.map((stroke) => {
+      const xs = stroke.points.map((p) => p[0]), ys = stroke.points.map((p) => p[1]);
+      const rx = stroke.size / 2, ry = (stroke.size / 2) * tall;
+      const x = round(Math.min(...xs) - rx), y = round(Math.min(...ys) - ry);
+      return { x, y, width: round(round(Math.max(...xs) + rx) - x), height: round(round(Math.max(...ys) + ry) - y) };
+    });
+  }
+
+  // What was painted, for the server (a mask) and, where the app cannot reach it, for the message (rectangles).
+  const painted = (erase) => ({ mask: maskData(!erase), regions: strokeRegions(), ...(erase && { erase: true }) });
+
+  async function sendTool() {
+    if (state.tool === 'comment') {
+      const notes = state.pins.filter((p) => p.text.trim());
+      if (!notes.length) return;
+      const lines = notes.map((p, i) => (i + 1) + '. At ' + percent(p.x) + ' from the left, ' + percent(p.y) + ' from the top: ' + p.text.trim());
+      return say('Edit this image:\n' + lines.join('\n'), 'Edit ' + refer() + ' with these changes, and keep everything else the same:\n' + lines.join('\n'));
+    }
+    if (!state.strokes.length) return;
+    $('send').disabled = true;
+    const area = painted(true);
+    await say('Erase the selected area', 'Erase the selected area of ' + refer() + ' (edit_regions ' + JSON.stringify(area.regions) + ', erase true).', area);
+  }
+
+  async function applyEdit() {
+    const change = editBox.value.trim();
+    if (!change) return editBox.focus();
+    if (state.tool === 'select' && state.strokes.length) {
+      $('apply').disabled = true;
+      const area = painted(false);
+      await say('Change the selected area: ' + change, 'Edit ' + refer() + ', changing only the selected area (edit_regions ' + JSON.stringify(area.regions) + '): ' + change, area);
+      $('apply').disabled = false;
+      return;
+    }
+    if (L.on) {
+      const name = current().name || 'layer';
+      await say('Edit this layer (' + name + '): ' + change, 'Edit ' + refer() + ', the layer "' + name + '": ' + change);
+      editBox.value = '';
+      return;
+    }
+    say('Edit this image: ' + change, 'Edit ' + refer() + ': ' + change);
+  }
+
+  // ---- layers: composite, drag, hide, download ----
+  const ICON_EYE = '<svg class="i" viewBox="0 0 24 24"><path d="M2.062 12.348a1 1 0 0 1 0-.696 10.75 10.75 0 0 1 19.876 0 1 1 0 0 1 0 .696 10.75 10.75 0 0 1-19.876 0"/><circle cx="12" cy="12" r="3"/></svg>';
+  const ICON_EYE_OFF = '<svg class="i" viewBox="0 0 24 24"><path d="M10.733 5.076a10.744 10.744 0 0 1 11.205 6.575 1 1 0 0 1 0 .696 10.747 10.747 0 0 1-1.444 2.49"/><path d="M14.084 14.158a3 3 0 0 1-4.242-4.242"/><path d="M17.479 17.499a10.75 10.75 0 0 1-15.417-5.151 1 1 0 0 1 0-.696 10.75 10.75 0 0 1 4.446-5.143"/><path d="m2 2 20 20"/></svg>';
+  const sizeOf = (text) => { const m = /^(\d+)x(\d+)$/.exec(text || ''); return m ? [Number(m[1]), Number(m[2])] : null; };
+  const four = (list) => Array.isArray(list) && list.length === 4 && list.every((v) => Number.isFinite(Number(v)));
+
+  /** Where a layer sits in the base, as [left, top, right, bottom] fractions; null when the result carries no usable box. */
+  function layerBox(image) {
+    const box = image && image.box;
+    if (!box) return null;
+    if (L.W && four(box.absolute)) { const a = box.absolute.map(Number); return [a[0] / L.W, a[1] / L.H, a[2] / L.W, a[3] / L.H]; }
+    if (four(box.normalized)) return box.normalized.map((v) => Number(v) / 1000);
+    return null;
+  }
+
+  /** A layer set is shown as layers only when the base and every layer say where they go; else it stays a gallery. */
+  function layersUsable(data) {
+    if (data.images.length < 2) return false;
+    const size = sizeOf(data.images[0].size);
+    return data.images.slice(1).every((image) => image.box && (four(image.box.normalized) || (size && four(image.box.absolute))));
+  }
+
+  function placeLayer(item) {
+    if (item.i === 0) return;
+    const b = layerBox(item.image);
+    if (!b) return;
+    const st = item.el.style;
+    st.left = (b[0] + item.dx) * 100 + '%';
+    st.top = (b[1] + item.dy) * 100 + '%';
+    st.width = (b[2] - b[0]) * 100 + '%';
+    st.height = (b[3] - b[1]) * 100 + '%';
+  }
+
+  function setLayerRatio(w, h) {
+    if (w > 0 && h > 0) lstage.style.setProperty('--ratio', String(w / h));
+  }
+
+  function selectLayer(index) {
+    L.sel = index;
+    if (index >= 0) state.selected = index;
+    L.items.forEach((item) => {
+      item.el.classList.toggle('sel', item.i === index);
+      item.row.classList.toggle('sel', item.i === index);
+      item.pick.setAttribute('aria-pressed', String(item.i === index));
+    });
+    $('ldl-layer').disabled = index < 0;
+    showComposer();
+  }
+
+  function setHidden(item, hidden) {
+    item.hidden = hidden;
+    item.el.classList.toggle('off', hidden);
+    item.row.classList.toggle('off', hidden);
+    item.eye.innerHTML = hidden ? ICON_EYE_OFF : ICON_EYE;
+    item.eye.setAttribute('aria-pressed', String(hidden));
+    item.eye.setAttribute('aria-label', (hidden ? 'Show ' : 'Hide ') + item.name);
+  }
+
+  function nudge(item, dx, dy) {
+    const b = layerBox(item.image);
+    if (!b || item.i === 0) return;
+    // The layer's middle stays inside the picture, so it can always be found and dragged back.
+    const mx = (b[0] + b[2]) / 2, my = (b[1] + b[3]) / 2;
+    item.dx = Math.min(1 - mx, Math.max(-mx, dx));
+    item.dy = Math.min(1 - my, Math.max(-my, dy));
+    placeLayer(item);
+  }
+
+  function showLayers(data, result) {
+    useGallery(false);
+    stage.replaceChildren();
+    thumbs.replaceChildren();
+    lstage.replaceChildren();
+    llist.replaceChildren();
+    const base = sizeOf(data.images[0].size);
+    L.W = base ? base[0] : 0;
+    L.H = base ? base[1] : 0;
+    L.items = [];
+    L.loading = true;
+    L.result = result;
+    clearTimeout(L.dotsTimer);
+    cancelAnimationFrame(L.raf);
+    lstage.className = 'lstage loading';
+    setLayerRatio(L.W, L.H);
+    if (!L.W) lstage.style.removeProperty('--ratio');
+    data.images.forEach((image, index) => {
+      const name = image.name || (index === 0 ? 'Base' : 'Layer ' + index);
+      const el = document.createElement('div');
+      el.className = 'lbox' + (index === 0 ? ' base' : '');
+      el.dataset.i = String(index);
+      const img = document.createElement('img');
+      img.alt = name;
+      img.draggable = false;
+      el.appendChild(img);
+      lstage.appendChild(el);
+      const row = document.createElement('li');
+      row.className = 'lrow';
+      const pick = document.createElement('button');
+      pick.type = 'button';
+      pick.className = 'pick';
+      const th = document.createElement('img');
+      th.className = 'th';
+      th.alt = '';
+      const nmbox = document.createElement('span');
+      nmbox.className = 'nmbox';
+      const nm = document.createElement('span');
+      nm.className = 'nm';
+      nm.textContent = name;
+      nmbox.appendChild(nm);
+      pick.append(th, nmbox);
+      const eye = document.createElement('button');
+      eye.type = 'button';
+      eye.className = 'eye';
+      row.append(pick, eye);
+      row.classList.add('pending');
+      el.classList.add('nopic');
+      const item = { i: index, image, name, el, img, row, pick, eye, th, nmbox, dx: 0, dy: 0, hidden: false, shown: false, failed: false, full: null };
+      L.items.push(item);
+      pick.addEventListener('click', () => selectLayer(index));
+      eye.addEventListener('click', () => setHidden(item, !item.hidden));
+      setHidden(item, false);
+      placeLayer(item);
+      img.addEventListener('load', () => {
+        if (th.getAttribute('src') !== img.currentSrc) th.src = img.currentSrc || img.src;
+        if (index === 0 && img.naturalWidth) setLayerRatio(img.naturalWidth, img.naturalHeight);
+      });
+      // Dragging: a layer follows the pointer (mouse, pen or finger) until it is let go.
+      let drag = null;
+      el.addEventListener('pointerdown', (event) => {
+        if (event.button > 0 || L.loading || !item.shown) return;
+        selectLayer(index);
+        if (index === 0) return;
+        const rect = lstage.getBoundingClientRect();
+        if (!rect.width) return;
+        drag = { x: event.clientX, y: event.clientY, dx: item.dx, dy: item.dy, rect };
+        try { el.setPointerCapture(event.pointerId); } catch (e) { /* not capturable: the move events still arrive over the stage */ }
+        el.classList.add('drag');
+        event.preventDefault();
+      });
+      el.addEventListener('pointermove', (event) => {
+        if (drag) nudge(item, drag.dx + (event.clientX - drag.x) / drag.rect.width, drag.dy + (event.clientY - drag.y) / drag.rect.height);
+      });
+      const stop = () => { drag = null; el.classList.remove('drag'); };
+      el.addEventListener('pointerup', stop);
+      el.addEventListener('pointercancel', stop);
+      // Top layer first in the list, as in an editor.
+      llist.insertBefore(row, llist.firstChild);
+    });
+    selectLayer(-1);
+    state.selected = 0;
+    // The same dots as while an image is made, over the stage until every layer has something to show. A load that
+    // is over within a moment never shows them.
+    const dots = document.createElement('canvas');
+    dots.className = 'dots';
+    dots.setAttribute('aria-hidden', 'true');
+    lstage.appendChild(dots);
+    L.dotsTimer = setTimeout(() => {
+      if (!L.loading) return;
+      lstage.classList.add('dots-on');
+      const start = performance.now();
+      const frame = () => { drawDots(dots, (performance.now() - start) / 1000, 0); if (L.loading) L.raf = requestAnimationFrame(frame); };
+      frame();
+    }, 150);
+    reportLoading();
+    L.items.forEach((item) => loadLayer(item));
+    const facts = [data.providerLabel || data.provider, data.model, data.images.length + ' layers'];
+    if (data.seconds) facts.push(data.seconds + 's');
+    if (data.leftOut) facts.push(data.leftOut + ' small left out');
+    if (data.credits && data.credits.left <= 10) facts.push(data.credits.left + (data.credits.left === 1 ? ' credit left' : ' credits left'));
+    const first = data.images[0];
+    if (first.path) facts.push('Saved to ' + (first.shown || first.path) + ' and ' + (data.images.length - 1) + ' more');
+    meta.textContent = facts.filter(Boolean).join(' · ');
+    if (data.credits && data.credits.left <= 10 && data.credits.url) {
+      const topup = document.createElement('button');
+      topup.type = 'button';
+      topup.className = 'topup';
+      topup.textContent = 'Top up';
+      topup.addEventListener('click', () => request('ui/open-link', { url: data.credits.url }).catch(() => {}));
+      meta.append(' ', topup);
+    }
+    meta.hidden = false;
+    reportSize();
+  }
+
+  /** How many layers are shown or have failed; the status line over the stage says how far along it is. */
+  function reportLoading() {
+    const total = L.items.length;
+    const done = L.items.filter((item) => item.shown || item.failed).length;
+    if (done >= total) {
+      L.loading = false;
+      clearTimeout(L.dotsTimer);
+      cancelAnimationFrame(L.raf);
+      lstage.classList.remove('loading', 'dots-on');
+      $('status').hidden = true;
+      // Everything appears together.
+      L.items.forEach((item) => { if (item.shown) { item.el.classList.remove('nopic'); placeLayer(item); item.img.classList.add('ready'); } });
+      return;
+    }
+    setStatus('Loading the layers' + (L.items.length > 1 ? ' (' + done + ' of ' + total + ')' : ''));
+  }
+
+  function markFailed(item) {
+    item.failed = true;
+    item.row.classList.remove('pending');
+    item.el.classList.add('nopic');
+    item.eye.hidden = true;
+    const why = document.createElement('span');
+    why.className = 'why';
+    why.textContent = 'Could not load this layer';
+    const retry = document.createElement('button');
+    retry.type = 'button';
+    retry.className = 'retry';
+    retry.textContent = 'Retry';
+    retry.addEventListener('click', () => { why.remove(); retry.remove(); item.eye.hidden = false; loadLayer(item); });
+    item.nmbox.appendChild(why);
+    item.row.appendChild(retry);
+    reportLoading();
+  }
+
+  /**
+   * One layer. The stage draws from a display-size copy, never the full file: first the small copy that came with the
+   * result (nothing to fetch), then a ~1024px copy from the server (a link where the app allows it, else a tool call).
+   * The full image is fetched only when it is downloaded. A picture is given to its <img> only once it has loaded.
+   */
+  async function loadLayer(item) {
+    item.failed = false;
+    item.row.classList.add('pending');
+    const show = async (src) => {
+      await tryImage(item.img, src, 60000);
+      if (!item.shown) {
+        item.shown = true;
+        item.row.classList.remove('pending');
+        if (L.loading) reportLoading();
+        else { item.el.classList.remove('nopic'); placeLayer(item); item.img.classList.add('ready'); }
+      }
+    };
+    const quick = quickCopy(L.result, item.image, item.i);
+    if (quick) await show(quick.src).catch(() => {});
+    const noTools = state.caps && !state.caps.serverTools;
+    const upgrades = [
+      () => (item.image.view ? show(item.image.view) : Promise.reject(new Error('none'))),
+      () => (noTools ? Promise.reject(new Error('no tool calls')) : fetchImage(item.image.id, 1024).then(show)),
+    ];
+    for (const step of upgrades) {
+      try { await step(); break; } catch (e) { /* the next way */ }
+    }
+    // Nothing else worked: the full picture's own address, if the app lets it be loaded.
+    if (!item.shown && item.image.src) await show(item.image.src).catch(() => {});
+    if (!item.shown) markFailed(item);
+  }
+
+  // Pixels the canvas can use without being tainted: a data address.
+  const blobToDataUri = (blob) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error('read failed')); r.readAsDataURL(blob); });
+  // The full-size picture, fetched when it is wanted (a download) and kept for the next one.
+  async function pixelsOf(item) {
+    if (item.full) return item.full;
+    if (item.image.src) {
+      try {
+        const res = await fetch(item.image.src, { mode: 'cors' });
+        if (res.ok) return (item.full = await blobToDataUri(await res.blob()));
+      } catch (e) { /* not allowed from here: ask the server instead */ }
+    }
+    return (item.full = await fetchImage(item.image.id));
+  }
+  const decode = (uri) => new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = () => reject(new Error('could not read an image')); i.src = uri; });
+
+  /** The arrangement as it is now (moved and hidden layers applied), as one PNG at the base's full size. */
+  async function composite() {
+    const first = await decode(await pixelsOf(L.items[0]));
+    const W = first.naturalWidth, H = first.naturalHeight;
+    if (!L.W) { L.W = W; L.H = H; L.items.forEach(placeLayer); }
+    const canvas = document.createElement('canvas');
+    canvas.width = W;
+    canvas.height = H;
+    const ctx = canvas.getContext('2d');
+    for (const item of L.items) {
+      if (item.hidden) continue;
+      const img = item.i === 0 ? first : await decode(await pixelsOf(item));
+      if (item.i === 0) { ctx.drawImage(img, 0, 0, W, H); continue; }
+      const b = layerBox(item.image);
+      if (b) ctx.drawImage(img, (b[0] + item.dx) * W, (b[1] + item.dy) * H, (b[2] - b[0]) * W, (b[3] - b[1]) * H);
+    }
+    return new Promise((resolve, reject) => canvas.toBlob((blob) => (blob ? resolve(blob) : reject(new Error('could not make the picture'))), 'image/png'));
+  }
+
+  async function saveBlob(blob, name) {
+    if (state.caps && state.caps.downloadFile) {
+      try {
+        const data = (await blobToDataUri(blob)).split(',')[1];
+        const res = await request('ui/download-file', { contents: [{ type: 'resource', resource: { uri: 'file:///' + name, mimeType: blob.type || 'image/png', blob: data } }] }, 60000);
+        if (!(res && res.isError)) return;
+      } catch (e) { /* fall back to a plain download */ }
+    }
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+  }
+
+  /** Dots on a button while it works. */
+  const busy = (button, on) => { button.disabled = on; button.classList.toggle('busy', on); button.setAttribute('aria-busy', String(on)); };
+
+  async function downloadComposite() {
+    const button = $('ldl-image');
+    busy(button, true);
+    try {
+      await saveBlob(await composite(), 'layers-composite.png');
+    } catch (e) {
+      errorBox.textContent = 'Could not make the picture: ' + (e && e.message ? e.message : 'failed');
+      errorBox.hidden = false;
+    }
+    busy(button, false);
+  }
+
+  async function downloadAll() {
+    const button = $('ldl-all');
+    busy(button, true);
+    for (const item of L.items) {
+      await download(item.image);
+      await new Promise((r) => setTimeout(r, 350));
+    }
+    busy(button, false);
+  }
+
+  function resetLayers() {
+    L.items.forEach((item) => { item.dx = item.dy = 0; placeLayer(item); setHidden(item, false); });
+  }
+
+  $('ldl-image').addEventListener('click', downloadComposite);
+  $('ldl-layer').addEventListener('click', async () => {
+    if (L.sel < 0) return;
+    const button = $('ldl-layer');
+    busy(button, true);
+    await download(L.items[L.sel].image);
+    busy(button, false);
+    button.disabled = L.sel < 0;
+  });
+  $('ldl-all').addEventListener('click', downloadAll);
+  $('lreset').addEventListener('click', resetLayers);
+  document.addEventListener('keydown', (event) => {
+    if (!L.on || L.sel < 0 || event.target.tagName === 'INPUT') return;
+    const item = L.items[L.sel];
+    const step = event.shiftKey ? 0.05 : 0.005;
+    const move = { ArrowLeft: [-step, 0], ArrowRight: [step, 0], ArrowUp: [0, -step], ArrowDown: [0, step] }[event.key];
+    if (move && item.i > 0) { event.preventDefault(); nudge(item, item.dx + move[0], item.dy + move[1]); }
+    else if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); setHidden(item, true); }
+  });
+
+  // ---- wiring ----
+  tools.querySelectorAll('[data-tool]').forEach((button) => button.addEventListener('click', () => setTool(button.dataset.tool)));
+  $('cancel').addEventListener('click', () => setTool(null));
+  $('close').addEventListener('click', () => closeEditor());
+  $('send').addEventListener('click', sendTool);
+  $('apply').addEventListener('click', applyEdit);
+  editBox.addEventListener('keydown', (event) => { if (event.key === 'Enter' && !event.isComposing) applyEdit(); });
+  $('save').addEventListener('click', () => download(current()));
+  $('vary').addEventListener('click', () => say('Make 3 variations of this image', 'Make 3 variations of ' + refer() + '.'));
+  $('removebg').addEventListener('click', () => say('Remove the background of this image', 'Remove the background from ' + refer() + '. Keep the subject exactly as it is and give me a PNG with a transparent background.'));
+  $('undo').addEventListener('click', () => {
+    if (state.tool === 'comment') {
+      const pin = state.pins.pop();
+      if (pin) { pin.dot.remove(); pin.note.remove(); }
+    } else {
+      state.strokes.pop();
+      redraw();
+    }
+    refreshToolbar();
+  });
+  $('resize').addEventListener('click', () => {
+    sizes.hidden = !sizes.hidden;
+    $('resize').setAttribute('aria-expanded', String(!sizes.hidden));
+  });
+  sizes.querySelectorAll('button').forEach((button) => button.addEventListener('click', () =>
+    say('Resize this image to ' + button.dataset.ratio + ' (' + button.dataset.name + ')', 'Resize ' + refer() + ' to ' + button.dataset.ratio + ' (' + button.dataset.name + '). Keep the scene and extend or recompose it to fit the new shape.')));
+  document.addEventListener('keydown', (event) => {
+    if (state.editing && !state.tool && event.target.tagName !== 'INPUT' && (event.key === 'ArrowRight' || event.key === 'ArrowLeft')) return page(event.key === 'ArrowRight' ? 1 : -1);
+    if (event.key !== 'Escape' || !state.editing) return;
+    if (!sizes.hidden) sizes.hidden = true;
+    else if (state.tool) setTool(null);
+    else closeEditor();
+  });
+
+  // ---- size reporting and start-up ----
+  let lastHeight = 0;
+  const reportSize = () => {
+    const height = Math.ceil($('app').getBoundingClientRect().height);
+    if (height === lastHeight) return;
+    lastHeight = height;
+    notify('ui/notifications/size-changed', { width: Math.ceil(document.documentElement.clientWidth), height });
+  };
+  // Watch the content itself: the root element's box follows the frame, not the content.
+  new ResizeObserver(reportSize).observe($('app'));
+  new MutationObserver(reportSize).observe($('app'), { childList: true, subtree: true, attributes: true, attributeFilter: ['hidden', 'class', 'style'] });
+
+  fitPage();
+  request('ui/initialize', {
+    protocolVersion: '2026-01-26',
+    appInfo: { name: 'tintloom', version: '0.8.10' },
+    appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
+  }, 10000)
+    .then((res) => {
+      // What the app says it supports, kept for error messages.
+      state.caps = (res && res.hostCapabilities) || null;
+      state.hostCaps = res && res.hostCapabilities ? Object.keys(res.hostCapabilities).join(',') || 'none' : 'not stated';
+      if (res && res.hostInfo) state.hostCaps += ' / ' + (res.hostInfo.name || '') + ' ' + (res.hostInfo.version || '');
+      applyContext(res && res.hostContext);
+    })
+    .catch(() => {})
+    .finally(() => {
+      notify('ui/notifications/initialized');
+      reportSize();
+      // A host may mount the card while the tool is still running yet send no input at all (or send it only once
+      // the call returns). Without this the card stays blank and zero-height, so the host shows nothing. If neither
+      // input nor result has come shortly after start-up, show the waiting dots; a result replaces them. A card
+      // reopened from history gets its result at once, well inside this delay, and never flashes the dots.
+      setTimeout(() => { if (!state.result && !state.args) { state.args = {}; showWaiting(); } }, 800);
+    });
+})();
+</script>
+</body>
+</html>
