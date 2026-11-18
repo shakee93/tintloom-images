@@ -135,12 +135,20 @@ Opens the image card in a stand-in chat at http://localhost:8790 with a fake pro
 
 Other scripts: `npm run serve` (local server over HTTP), `npm run validate` (needs the `claude` CLI).
 
+## Permissions and data
+
+- **Network:** the plugin sends a request only to the provider you chose (OpenAI, Google, fal.ai or BytePlus), with your key. With the `cloud` provider it calls the endpoint you set. It has no telemetry and no tracking. The optional hosted version at tintloom.com is separate and is used only if you connect it.
+- **Files:** it writes the images it makes into your project folder, and reads an image file only when you ask Claude to edit it. It does not scan your folders or read anything else.
+- **Keys:** stored in the system keychain through Claude Code's plugin settings, or in a file only you can read. Never logged, never written into the plugin folder. HTTP errors redact them.
+- **Prompts and images:** go to your chosen provider under your own account with them. The plugin keeps none of it.
+- **Debug log:** off unless you create `~/.config/tintloom/debug.log`. It never contains keys or image data.
+- **Dependencies:** none. The plugin is plain Node.js you can read in this repository.
+
+More: [SECURITY.md](SECURITY.md) and the latest [scan of the tool definitions](docs/security-scan.md).
+
 ## Security
 
-- Provider keys are never logged. HTTP errors redact them before they reach you or Claude.
-- The plugin stores keys in the system keychain (plugin settings) or in a file only you can read. It does not write keys into the plugin folder.
-- The debug log is off unless you create the file, and it never contains keys or image data.
-- Report a vulnerability privately with "Report a vulnerability" on this repository's Security tab, not in a public issue.
+Report a vulnerability by email to support@tintloom.com. See [SECURITY.md](SECURITY.md).
 
 ## Licence
 
