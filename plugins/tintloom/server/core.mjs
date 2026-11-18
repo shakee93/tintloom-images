@@ -10,7 +10,7 @@ import { imageSize, maskFromRegions, clearUnderMask, keepOutsideMask, shrinkPng,
 import { UserError, extForMime, sniffMime } from '../skills/image/scripts/lib/util.mjs';
 import { getProvider, providers } from '../skills/image/scripts/providers/index.mjs';
 
-export const VERSION = '0.8.18';
+export const VERSION = '0.8.20';
 const PROTOCOL = '2025-06-18';
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 // Bigger images are not sent to the model inline: chat apps cap tool results.
@@ -598,7 +598,7 @@ async function splitIntoLayers(args, ctx, config) {
   let made;
   const records = [];
   try {
-    made = await provider.generate(req, { key: found.key, env, setting: (name) => resolveSetting(name, config, env) });
+    made = await provider.generate(req, { key: found.key, env, shrink: ctx.shrink, setting: (name) => resolveSetting(name, config, env) });
     if (!made.length) throw new UserError(`${provider.label} returned no layers.`, 'Try again.');
     const paths = mode === 'http' ? [] : await outputPaths(out, 'layers', made, false, ctx.projectDir);
     for (const [i, img] of made.entries()) {
@@ -778,7 +778,7 @@ async function generateImage(args0, ctx) {
   await report();
   let saving = Promise.resolve(); // files are named one at a time, so two never pick the same name
   const finish = async (r, index) => {
-    const [img] = await provider.generate(r, { key, env, setting: (name) => resolveSetting(name, config, env) });
+    const [img] = await provider.generate(r, { key, env, shrink: ctx.shrink, setting: (name) => resolveSetting(name, config, env) });
     if (!img) throw new UserError(`${provider.label} returned no image.`, 'The prompt may have been declined. Rephrase it and try again.');
     // Providers treat a mask as a hint and redraw the whole picture. Put back everything outside it.
     const kept = mask ? keepOutsideMask(original.bytes, img.bytes, mask.bytes) : null;
@@ -874,9 +874,9 @@ function keyHint(env) {
     return 'That provider is not available on this service. Leave out `provider` and `model` to use the default.';
   }
   if (env.TINTLOOM_HOST === 'plugin') {
-    return 'Tell the user to add a provider key: run /plugin, open tintloom, choose Configure, paste a key (OpenAI, Gemini, fal or BytePlus ModelArk), then restart the session. Do not ask for the key in chat.';
+    return 'Tell the user to add a provider key: run /plugin, open tintloom, choose Configure, paste a key (OpenAI, Gemini, fal, BytePlus ModelArk or Black Forest Labs), then restart the session. Do not ask for the key in chat.';
   }
-  return 'Set a provider key in the server environment: OPENAI_API_KEY, GEMINI_API_KEY, FAL_KEY or ARK_API_KEY.';
+  return 'Set a provider key in the server environment: OPENAI_API_KEY, GEMINI_API_KEY, FAL_KEY, ARK_API_KEY or BFL_API_KEY.';
 }
 
 async function callTool(name, args = {}, ctx) {

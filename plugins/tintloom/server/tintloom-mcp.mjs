@@ -8,7 +8,7 @@
 // Keys come from the plugin's settings (TINTLOOM_*_KEY), the usual provider
 // variables (OPENAI_API_KEY, GEMINI_API_KEY, FAL_KEY, ARK_API_KEY), or the CLI's config file.
 import { execFile } from 'node:child_process';
-import { timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual, webcrypto } from 'node:crypto';
 import { lookup } from 'node:dns/promises';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
@@ -19,6 +19,9 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { configPath } from '../skills/image/scripts/lib/config.mjs';
 import { shrinkPng } from '../skills/image/scripts/lib/png.mjs';
 import { CARD_URI, ImageStore, VERSION, handleMessage as handle, newImageId } from './core.mjs';
+
+// Node 18 has no `crypto` global (Node 20 and Deno do), and the shared core uses it for image ids.
+if (!globalThis.crypto) globalThis.crypto = webcrypto;
 
 export { CARD_URI, ImageStore };
 

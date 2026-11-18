@@ -228,6 +228,43 @@ export function shrinkPng(buf, maxEdge) {
   return encodePng(width, height, out);
 }
 
+/**
+ * A PNG scaled down, keeping its shape, to at most `maxPixels` pixels (not enlarged), by averaging the source pixels
+ * under each new one, weighted by alpha. Null if it cannot be read. Any size is allowed, unlike shrinkPng's whole steps.
+ */
+export function fitPng(buf, maxPixels) {
+  const image = decodePng(buf);
+  if (!image) return null;
+  const scale = Math.min(1, Math.sqrt(maxPixels / (image.width * image.height)));
+  let width = Math.max(1, Math.floor(image.width * scale)), height = Math.max(1, Math.floor(image.height * scale));
+  while (width * height > maxPixels) [width, height] = width >= height ? [width - 1, height] : [width, height - 1];
+  if (width === image.width && height === image.height) return buf;
+  const out = Buffer.alloc(width * height * 4);
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.floor((y * image.height) / height), y1 = Math.max(y0 + 1, Math.floor(((y + 1) * image.height) / height));
+    for (let x = 0; x < width; x++) {
+      const x0 = Math.floor((x * image.width) / width), x1 = Math.max(x0 + 1, Math.floor(((x + 1) * image.width) / width));
+      let r = 0, g = 0, b = 0, a = 0;
+      for (let sy = y0; sy < y1; sy++) {
+        let i = (sy * image.width + x0) * 4;
+        for (let sx = x0; sx < x1; sx++, i += 4) {
+          const alpha = image.rgba[i + 3];
+          r += image.rgba[i] * alpha;
+          g += image.rgba[i + 1] * alpha;
+          b += image.rgba[i + 2] * alpha;
+          a += alpha;
+        }
+      }
+      const o = (y * width + x) * 4;
+      out[o] = a ? r / a : 0;
+      out[o + 1] = a ? g / a : 0;
+      out[o + 2] = a ? b / a : 0;
+      out[o + 3] = a / ((y1 - y0) * (x1 - x0));
+    }
+  }
+  return encodePng(width, height, out);
+}
+
 /** The image with everything under the mask's transparent area cleared, so a model cannot see what is being removed. Null if either cannot be read. */
 export function clearUnderMask(imageBuf, maskBuf) {
   const image = decodePng(imageBuf), mask = decodePng(maskBuf);

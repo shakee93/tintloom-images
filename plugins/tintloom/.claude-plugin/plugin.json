@@ -1,7 +1,7 @@
 {
   "name": "tintloom",
-  "version": "0.8.18",
-  "description": "Image generation and editing for Claude with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux), BytePlus ModelArk (Seedream) or a hosted endpoint. Images appear in an inline card.",
+  "version": "0.8.20",
+  "description": "Image generation and editing for Claude with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux), BytePlus ModelArk (Seedream), Black Forest Labs (Flux) or a hosted endpoint. Images appear in an inline card.",
   "author": {
     "name": "Tintloom"
   },
@@ -14,6 +14,8 @@
     "gemini",
     "fal",
     "modelark",
+    "bfl",
+    "flux",
     "byok"
   ],
   "mcpServers": {
@@ -29,6 +31,7 @@
         "TINTLOOM_GEMINI_KEY": "${user_config.gemini_api_key}",
         "TINTLOOM_FAL_KEY": "${user_config.fal_api_key}",
         "TINTLOOM_MODELARK_KEY": "${user_config.modelark_api_key}",
+        "TINTLOOM_BFL_KEY": "${user_config.bfl_api_key}",
         "TINTLOOM_DEFAULT_PROVIDER": "${user_config.default_provider}"
       }
     }
@@ -58,6 +61,12 @@
       "description": "For ByteDance's own Seedream models. Leave empty if you don't use ModelArk. Create one in the BytePlus ModelArk console (API key management).",
       "sensitive": true
     },
+    "bfl_api_key": {
+      "type": "string",
+      "title": "Black Forest Labs API key",
+      "description": "For Flux models straight from Black Forest Labs. Leave empty if you don't use it. Create one at dashboard.bfl.ai.",
+      "sensitive": true
+    },
     "default_provider": {
       "type": "string",
       "title": "Default provider",
@@ -68,7 +77,8 @@
         "openai",
         "gemini",
         "fal",
-        "modelark"
+        "modelark",
+        "bfl"
       ]
     }
   }

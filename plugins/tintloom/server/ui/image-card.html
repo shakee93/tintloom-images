@@ -2132,22 +2132,52 @@
 
   // Pixels the canvas can use without being tainted: a data address.
   const blobToDataUri = (blob) => new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = () => reject(new Error('read failed')); r.readAsDataURL(blob); });
-  // The full-size picture, fetched when it is wanted (a download) and kept for the next one.
-  async function pixelsOf(item) {
-    if (item.full) return item.full;
-    if (item.image.src) {
-      try {
-        const res = await fetch(item.image.src, { mode: 'cors' });
-        if (res.ok) return (item.full = await blobToDataUri(await res.blob()));
-      } catch (e) { /* not allowed from here: ask the server instead */ }
+  // The full picture of a layer, as something an image can load: fetched once, however many times it is asked for
+  // and by however many callers at once. By its link where the app allows it, else from the server in pieces.
+  function pixelsOf(item) {
+    if (!item.fetching) {
+      item.fetching = (async () => {
+        if (item.image.src) {
+          try {
+            const res = await fetch(item.image.src, { mode: 'cors' });
+            if (res.ok) {
+              // Kept as it arrived where the app lets a picture load from memory: turning megabytes into base64
+              // and back only to draw them is time for nothing. Where it does not, base64 it is.
+              const blob = await res.blob();
+              const url = URL.createObjectURL(blob);
+              try { await decode(url); return (item.full = url); } catch (e) { URL.revokeObjectURL(url); }
+              return (item.full = await blobToDataUri(blob));
+            }
+          } catch (e) { /* not allowed from here: ask the server instead */ }
+        }
+        return (item.full = await fetchImage(item.image.id));
+      })();
+      // A fetch that failed may be tried again by the next press.
+      item.fetching.catch(() => { item.fetching = null; });
     }
-    return (item.full = await fetchImage(item.image.id));
+    return item.fetching;
+  }
+  // Every layer that will be drawn, fetched a few at a time instead of one after another; `tell` hears how many are in.
+  async function gather(items, tell) {
+    let next = 0, got = 0;
+    const out = new Array(items.length);
+    const worker = async () => {
+      while (next < items.length) {
+        const at = next++;
+        out[at] = await decode(await pixelsOf(items[at]));
+        if (tell) tell(++got, items.length);
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, items.length) }, worker));
+    return out;
   }
   const decode = (uri) => new Promise((resolve, reject) => { const i = new Image(); i.onload = () => resolve(i); i.onerror = () => reject(new Error('could not read an image')); i.src = uri; });
 
   /** The arrangement as it is now (moved and hidden layers applied), as one PNG at the base's full size. */
-  async function composite() {
-    const first = await decode(await pixelsOf(L.items[0]));
+  async function composite(tell) {
+    const drawn = [0, ...L.order].map((index) => L.items[index]).filter((item) => item.i === 0 || !item.hidden);
+    const pictures = new Map((await gather(drawn, tell)).map((img, at) => [drawn[at], img]));
+    const first = pictures.get(L.items[0]);
     const W = first.naturalWidth, H = first.naturalHeight;
     if (!L.W) { L.W = W; L.H = H; L.items.forEach(placeLayer); }
     const canvas = document.createElement('canvas');
@@ -2159,7 +2189,7 @@
     for (const index of [0, ...L.order]) {
       const item = L.items[index];
       if (item.hidden) continue;
-      const img = item.i === 0 ? first : await decode(await pixelsOf(item));
+      const img = pictures.get(item);
       if (item.i === 0) { ctx.drawImage(img, 0, 0, W, H); continue; }
       const b = layerBox(item.image);
       if (!b) continue;
@@ -2197,15 +2227,25 @@
 
   async function downloadComposite() {
     const button = $('ldl-image');
+    const words = button.textContent;
     busy(button, true);
     try {
-      await saveBlob(await composite(), 'layers-composite.png');
+      // The wait is the full-size layers arriving: say how many are in, so it is not a blank wait.
+      const blob = await composite((got, total) => { button.textContent = got < total ? 'Fetching layers ' + got + ' of ' + total : 'Making the image'; });
+      await saveBlob(blob, 'layers-composite.png');
     } catch (e) {
       errorBox.textContent = 'Could not make the picture: ' + (e && e.message ? e.message : 'failed');
       errorBox.hidden = false;
     }
+    button.textContent = words;
     busy(button, false);
   }
+
+  // The full-size layers start arriving as soon as the pointer or the keyboard reaches Download image, so most of the
+  // wait is over by the time it is pressed. Nothing is fetched for someone who only looks.
+  const warmLayers = () => { if (L.on && !L.loading) gather(L.items.filter((item) => item.i === 0 || !item.hidden)).catch(() => {}); };
+  $('ldl-image').addEventListener('pointerenter', warmLayers);
+  $('ldl-image').addEventListener('focus', warmLayers);
 
   async function downloadAll() {
     const button = $('ldl-all');
@@ -2506,7 +2546,7 @@
   function hello() {
     request('ui/initialize', {
       protocolVersion: '2026-01-26',
-      appInfo: { name: 'tintloom', version: '0.8.18' },
+      appInfo: { name: 'tintloom', version: '0.8.20' },
       appCapabilities: { availableDisplayModes: ['inline', 'fullscreen'] },
     }, 0).then((res) => {
       if (answered) return;

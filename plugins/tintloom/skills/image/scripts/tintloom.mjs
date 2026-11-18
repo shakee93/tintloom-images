@@ -28,7 +28,7 @@ Usage:
 
 Options for generate and edit:
   -p, --prompt <text>      What to make (required; optional with --layers)
-      --provider <id>      openai, gemini, fal, modelark or cloud (default: your default, else first with a key)
+      --provider <id>      openai, gemini, fal, modelark, bfl or cloud (default: your default, else first with a key)
   -m, --model <id>         Provider model (default: the provider's best general model)
   -i, --image <path>       Input or reference image; repeat for several
       --mask <path>        Mask for edits (openai only)

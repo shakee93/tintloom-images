@@ -1,6 +1,6 @@
 ---
 name: image
-description: Generate or edit raster images (photos, illustrations, product shots, hero images, textures, sprites, mockups, posters, transparent cutouts) with the user's own image-provider keys - OpenAI gpt-image, Google Gemini "Nano Banana", fal.ai models such as Seedream and Flux, BytePlus ModelArk (Seedream). Use whenever the user asks to create, draw, generate, render or make an image or picture, to edit, restyle, extend or combine existing image files, or to produce visual variants. Not for SVG, icons, charts or diagrams that are better written as code.
+description: Generate or edit raster images (photos, illustrations, product shots, hero images, textures, sprites, mockups, posters, transparent cutouts) with the user's own image-provider keys - OpenAI gpt-image, Google Gemini "Nano Banana", fal.ai models such as Seedream and Flux, BytePlus ModelArk (Seedream), Black Forest Labs (Flux). Use whenever the user asks to create, draw, generate, render or make an image or picture, to edit, restyle, extend or combine existing image files, or to produce visual variants. Not for SVG, icons, charts or diagrams that are better written as code.
 ---
 
 # Image generation
@@ -38,7 +38,7 @@ When the card's message says `edit_regions [...]` in place of a mask id, pass th
 
 To split an image into layers ("separate the elements", "give me the pieces as transparent PNGs"), pass `images: [{id}]` (exactly one image) or `selection: true`, with `layers: true`; no mask, `edit_regions` or `count`. `prompt` is optional and may say how to split it. It needs a BytePlus ModelArk key and always runs on Seedream. The result is a base (the picture with the elements taken out) plus transparent PNG layers, each with an id and a name, base first; ModelArk bills every image it returns (usually about 5), and at most 10 are kept. Layer ids can be edited like any image. The CLI form is `tintloom edit --image in.png --layers`.
 
-Masks and regions work with `openai` only. If the user's provider is Gemini, fal or ModelArk, do the edit by describing the area in the prompt instead, and say that it may touch more than the selected part.
+Masks and regions work with `openai` only. If the user's provider is Gemini, fal, ModelArk or Black Forest Labs, do the edit by describing the area in the prompt instead, and say that it may touch more than the selected part.
 
 ## Arguments
 
@@ -60,7 +60,7 @@ Masks and regions work with `openai` only. If the user's provider is Gemini, fal
 
 ## Keys
 
-If the tool says no key is set, tell the user to add one: run `/plugin`, open **tintloom**, choose **Configure**, paste a key for OpenAI, Gemini, fal or BytePlus ModelArk, then start a new session. Never ask for a key in the chat, and never print one.
+If the tool says no key is set, tell the user to add one: run `/plugin`, open **tintloom**, choose **Configure**, paste a key for OpenAI, Gemini, fal, BytePlus ModelArk or Black Forest Labs, then start a new session. Never ask for a key in the chat, and never print one.
 
 ## Choosing a provider and model
 
@@ -69,6 +69,7 @@ If the tool says no key is set, tell the user to add one: run `/plugin`, open **
 - **openai** (`gpt-image-2`): the safest general choice. Best at text inside images, layouts and precise edits.
 - **gemini** (Nano Banana): strong at keeping a person, product or character consistent across edits, and at blending several reference images.
 - **modelark** (`seedream`, `seedream-5-flash`, `seedream-4.5`, or any ModelArk model id): ByteDance's own Seedream; edits and blends up to 10 images, no masks, no transparency.
+- **bfl** (`flux-2-pro`, `flux-3-image`, `flux-3-image-klein`, `flux-2-max`, `flux-2-flex`, `flux-2-klein-9b`): Flux straight from Black Forest Labs; edits and blends up to 8 images (Klein 4, FLUX 3 10), no masks, no transparency. `flux-3-image-klein` is the fast, cheap one.
 - **fal** (`seedream`, `flux-schnell`, or any fal model id): widest choice; `flux-schnell` is fast and cheap for drafts.
 
 If a provider refuses an option, say which option and offer the provider that supports it. Don't silently drop something the user asked for, and don't silently switch provider or model.
@@ -114,4 +115,4 @@ node "${CLAUDE_SKILL_DIR}/scripts/tintloom.mjs" generate --json -p "…" -a 16:9
 
 If `${CLAUDE_SKILL_DIR}` appears unexpanded, use the absolute path of `scripts/tintloom.mjs` in the folder that holds this file.
 
-`edit -i in.png -p "…"` edits; `providers --json` lists providers; `--help` lists every option. It reads keys from `OPENAI_API_KEY`, `GEMINI_API_KEY`, `FAL_KEY` or `ARK_API_KEY`, or from `keys set <provider>`, which the user runs in their own terminal. Give the shell call a timeout of at least 5 minutes, then open the saved file with Read.
+`edit -i in.png -p "…"` edits; `providers --json` lists providers; `--help` lists every option. It reads keys from `OPENAI_API_KEY`, `GEMINI_API_KEY`, `FAL_KEY`, `ARK_API_KEY` or `BFL_API_KEY`, or from `keys set <provider>`, which the user runs in their own terminal. Give the shell call a timeout of at least 5 minutes, then open the saved file with Read.
