@@ -1,6 +1,6 @@
 {
   "name": "tintloom",
-  "version": "0.8.20",
+  "version": "0.8.21",
   "description": "Image generation and editing for Claude Code with your own provider keys.",
   "type": "module",
   "license": "MIT",

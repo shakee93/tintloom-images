@@ -1,6 +1,6 @@
 {
   "name": "tintloom",
-  "version": "0.8.20",
+  "version": "0.8.21",
   "description": "Generate and edit images with your own provider keys: OpenAI gpt-image, Google Gemini Nano Banana, fal.ai (Seedream, Flux), BytePlus ModelArk (Seedream), Black Forest Labs (Flux) or a hosted endpoint.",
   "author": {
     "name": "Tintloom"

@@ -10,7 +10,7 @@ import { imageSize, maskFromRegions, clearUnderMask, keepOutsideMask, shrinkPng,
 import { UserError, extForMime, sniffMime } from '../skills/image/scripts/lib/util.mjs';
 import { getProvider, providers } from '../skills/image/scripts/providers/index.mjs';
 
-export const VERSION = '0.8.20';
+export const VERSION = '0.8.21';
 const PROTOCOL = '2025-06-18';
 export const MAX_INPUT_BYTES = 20 * 1024 * 1024;
 // Bigger images are not sent to the model inline: chat apps cap tool results.
