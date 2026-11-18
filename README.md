@@ -1,5 +1,7 @@
 # Tintloom
 
+[![test](https://github.com/shakee93/tintloom-images/actions/workflows/test.yml/badge.svg)](https://github.com/shakee93/tintloom-images/actions/workflows/test.yml) [![Tintloom MCP server](https://glama.ai/mcp/servers/shakee93/tintloom-images/badges/score.svg)](https://glama.ai/mcp/servers/shakee93/tintloom-images)
+
 Image generation and editing for Claude Code, with your own provider keys.
 
 Claude has no image model of its own. This plugin gives it one. Ask for an image and Claude makes it with OpenAI, Google Gemini, fal.ai or BytePlus ModelArk, using a key you supply. You pay the provider per image and nothing else. The saved file lands in your project.
@@ -123,7 +125,7 @@ To see what an app sends the plugin, create `~/.config/tintloom/debug.log`. The 
 npm test
 ```
 
-Runs `node --test test/*.test.mjs` against a local provider stub. No keys or network needed.
+Runs `node --test test/*.test.mjs` against a local provider stub. No keys or network needed. CI runs it on Node 18, 20 and 22, on Linux.
 
 ```bash
 npm run preview
